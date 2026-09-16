@@ -1,0 +1,87 @@
+<launch>
+    <!--
+      NeuPAN + limo 仿真环境（Autonomous_navigation_exploration 的世界文件）。
+
+      世界可选: simple_S1 / dense_S2 / mix_D1 / corridor / maze
+      例:  roslaunch neupan_ros gazebo_limo_simple_s1.launch \
+               world:=mix_D1 x:=-10 y:=-10 yaw:=0.785
+
+      起点由本文件的 x/y/z/yaw 决定；终点在 neupan_gazebo_limo.launch 里用
+      goal:="X Y THETA" 指定，两者独立。
+    -->
+
+    <arg name="robot_namespace" default="/"/>
+    <arg name="gui" default="true"/>
+
+    <!-- 世界。给名字即可，也可以用 world_name 直接给完整路径 -->
+    <arg name="world" default="mix_D1_new"/>
+    <arg name="world_name"
+         default="$(find vehicle_simulator)/world/$(arg world).world"/>
+
+    <!-- 机器人初始位姿（Gazebo 世界系；odom 原点与之重合） -->
+    <arg name="x"   default="-3.0"/>
+    <arg name="y"   default="-3.0"/>
+    <arg name="z"   default="0.15"/>
+    <arg name="yaw" default="0.0"/>
+
+    <!--
+      车轮接触参数。默认 mu=1.0/kp=1e6，原始 URDF 是 mu=10/kp=1e7，后者在角速度
+      >1.5 rad/s 时会让 ODE 接触求解发散：一个物理步内 pitch 跳到 41°、线速度
+      冲到 -53 m/s，随后 NaN，Gazebo 把非法位姿钳成 (0,0,0) —— 现象就是"小车
+      瞬移到原点并卡死"。
+    -->
+    <arg name="wheel_mu" default="1.0"/>
+    <arg name="wheel_kp" default="1000000.0"/>
+
+    <!--
+      ros_control。默认 false。开启时 gazebo_ros_control 会按 pid_gains 对 4 个
+      车轮关节施加力矩（把关节速度拉向 0，因为只加载了 limo_state_controller，
+      没有速度控制器给它下指令），与 skid_steer 插件的 SetVelocity 对打，放大
+      接触不稳定。关闭后 /joint_states 由 joint_state_publisher 提供。
+    -->
+    <arg name="ros_control" default="false"/>
+
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+        <arg name="world_name"   value="$(arg world_name)"/>
+        <arg name="paused"       value="false"/>
+        <arg name="use_sim_time" value="true"/>
+        <arg name="gui"          value="$(arg gui)"/>
+        <arg name="headless"     value="false"/>
+        <arg name="debug"        value="false"/>
+    </include>
+
+    <param name="robot_description"
+           command="$(find xacro)/xacro '$(find limo_description)/urdf/limo_four_diff.xacro'
+                    robot_namespace:=$(arg robot_namespace)
+                    wheel_mu:=$(arg wheel_mu)
+                    wheel_kp:=$(arg wheel_kp)
+                    ros_control:=$(arg ros_control)" />
+
+    <node name="spawn_limo_model" pkg="gazebo_ros" type="spawn_model"
+          args="-x $(arg x)
+                -y $(arg y)
+                -z $(arg z)
+                -Y $(arg yaw)
+                -unpause
+                -urdf
+                -param robot_description
+                -model 'limo$(arg robot_namespace)'" />
+
+    <!-- ros_control 路线：加载 joint_state_controller -->
+    <group if="$(arg ros_control)">
+        <rosparam file="$(find limo_gazebo_sim)/config/limo_four_diff_control.yaml"
+                  command="load"/>
+        <node name="controller_spawner" pkg="controller_manager" type="spawner"
+              respawn="false" output="screen" args="limo_state_controller"/>
+    </group>
+
+    <!-- 默认路线：车轮由 skid_steer 插件驱动，关节角度用 joint_state_publisher 补齐 -->
+    <node unless="$(arg ros_control)"
+          name="joint_state_publisher" pkg="joint_state_publisher"
+          type="joint_state_publisher">
+        <param name="rate" value="50"/>
+    </node>
+
+    <node name="robot_state_publisher" pkg="robot_state_publisher"
+          type="robot_state_publisher" />
+</launch>

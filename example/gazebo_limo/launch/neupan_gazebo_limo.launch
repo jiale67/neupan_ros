@@ -1,0 +1,55 @@
+<launch>
+
+    <arg name="config_file" default= '$(find neupan_ros)/example/gazebo_limo/config/neupan_planner_limo.yaml'/>
+    <arg name="map_frame" default='odom'/>
+    <arg name="base_frame" default='base_link'/>
+    <arg name="lidar_frame" default='laser_link'/>
+    <arg name="scan_range" default='0.0 5.0'/>
+    <arg name="scan_angle_range" default='-3.14 3.14'/>
+    <arg name="marker_size" default='0.05'/>
+    <arg name="marker_z" default='0.3'/>
+    <arg name="scan_downsample" default='6'/>
+    <arg name="dune_checkpoint" default='$(find neupan_ros)/example/gazebo_limo/pretrain_limo/model_5000.pth'/>
+    <arg name="refresh_initial_path" default='false'/>
+
+    <!--
+      goal: 终点，"X Y" 或 "X Y THETA"（THETA 弧度，默认 0）。坐标系是 map_frame
+      (=odom)，原点与机器人 spawn 位置无关，就是 Gazebo 世界原点。
+      路径直接从机器人当前位姿连到这里，不经过 yaml 的 ipath.waypoints。
+
+      留空 -> 沿用 yaml 的 ipath.waypoints（默认 [[0,0,0],[5,0,0]]，会让机器人
+      先开向原点，这通常不是你在别处 spawn 时想要的）。
+
+      例: roslaunch neupan_ros neupan_gazebo_limo.launch goal:="8 6"
+    -->
+    <arg name="goal" default=''/>
+
+    <!--
+      loop: 覆盖 yaml 的 ipath.loop。
+        false -> 到终点停住（指定 goal 时一般用这个，本文件的默认值）
+        true  -> 到终点后重置路径，在起点和终点之间无限往复
+      留空则用 yaml 里的值（当前是 True）。
+    -->
+    <arg name="loop" default='false'/>
+
+    <node name='neupan_control' pkg="neupan_ros" type="neupan_node.py" output="screen">
+        <param name="config_file" value="$(arg config_file)"/>
+        <param name="map_frame" value="$(arg map_frame)"/>
+        <param name="base_frame" value="$(arg base_frame)"/>
+        <param name="lidar_frame" value="$(arg lidar_frame)"/>
+        <param name="scan_range" value="$(arg scan_range)"/>
+        <param name="scan_angle_range" value="$(arg scan_angle_range)"/>
+        <param name="marker_size" value="$(arg marker_size)"/>
+        <param name="scan_downsample" value="$(arg scan_downsample)"/>
+        <param name="dune_checkpoint" value="$(arg dune_checkpoint)"/>
+        <param name="refresh_initial_path" value="$(arg refresh_initial_path)"/>
+        <param name="goal" value="$(arg goal)"/>
+        <param name="loop" value="$(arg loop)"/>
+        <remap from="/scan" to="/limo/scan"/>
+        <remap from="/neupan_cmd_vel" to="/cmd_vel"/>
+        <remap from="/neupan_goal" to="/move_base_simple/goal"/>
+    </node>
+
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find neupan_ros)/example/gazebo_limo/rviz/limo_gazebo.rviz" />
+
+</launch>
