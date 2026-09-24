@@ -1,0 +1,141 @@
+<?xml version="1.0"?>
+
+<robot name="limo_four_diff" xmlns:xacro="http://ros.org/wiki/xacro">
+    <xacro:include filename="$(find neupan_ros)/example/gazebo_limo/urdf/limo_gazebo.gazebo" />
+
+    <!-- Actuator configurations -->
+    <xacro:limo_wheel_transmission wheel_prefix="front_right" />
+    <xacro:limo_wheel_transmission wheel_prefix="front_left" />
+    <xacro:limo_wheel_transmission wheel_prefix="rear_left" />
+    <xacro:limo_wheel_transmission wheel_prefix="rear_right" />
+    <!-- Controller configurations -->
+    <xacro:gazebo_laser frame_prefix="laser_link" />
+    <!--
+      深度相机默认关闭。它的离屏渲染在本机的混合显卡(NVIDIA+AMD)上会阻塞
+      Gazebo 的物理循环约 30s，导致 sim time 冻结、controller_spawner 超时、
+      小车与原点障碍物穿模后被弹翻、gzclient 黑屏。
+      NeuPAN 只需要 /scan，不需要深度相机。
+      需要时用: roslaunch ... depth_camera:=true
+    -->
+    <xacro:arg name="depth_camera" default="false"/>
+    <xacro:if value="$(arg depth_camera)">
+        <xacro:gazebo_depth_camera frame_prefix="depth_camera" />
+    </xacro:if>
+    <xacro:gazebo_imu frame_prefix="imu" />
+
+    <!--
+      车轮接触参数，保持原值。实测这两个值不是发散的原因：mu=10/kp=1e7 配
+      ros_control:=false 时 w=1.88 rad/s 下峰值 pitch 仅 0.4°；反之把它们软化到
+      mu=1.0/kp=1e6 但保留 ros_control，照样发散。留作参数只为方便调试。
+    -->
+    <xacro:arg name="wheel_mu" default="10"/>
+    <xacro:arg name="wheel_kp" default="10000000.0"/>
+    <xacro:property name="w_mu" value="$(arg wheel_mu)"/>
+    <xacro:property name="w_kp" value="$(arg wheel_kp)"/>
+
+    <!--
+      drive_mode: diff | omni
+        diff -> libgazebo_ros_skid_steer_drive.so，四轮滑移，只吃 linear.x / angular.z
+        omni -> libgazebo_ros_planar_move.so，直接给 base_link 施加平面速度，
+                吃 linear.x / linear.y / angular.z，小车能左右横移
+
+      omni 是"视觉全向"：planar_move 不驱动车轮关节，而是 SetLinearVel/SetAngularVel
+      整个 model，所以车轮不转、只是贴地滑过去。麦轮的滚子摩擦没有建模，这也是
+      选它的理由 —— 只要看起来能横移就够，不需要标定麦轮动力学。
+
+      两个副作用，omni 下必须知道：
+        1. planar_move 每个物理步把 z 线速度钳成 0，重力不生效。小车被钉在 spawn
+           高度，不会自己落到地面。所以 launch 里 omni 的 z 默认值要给贴地值，
+           不能沿用 diff 的 0.15。
+        2. 速度是直接写进去的，不是靠接触力推的，撞上障碍物会硬挤进去而不是被顶住。
+           避障由 NeuPAN 规划保证，仿真里别指望碰撞把车挡下来。
+    -->
+    <xacro:arg name="drive_mode" default="diff"/>
+    <xacro:property name="drive_mode" value="$(arg drive_mode)"/>
+
+    <xacro:macro name="limo_wheel_friction" params="wheel">
+        <gazebo reference="${wheel}">
+            <mu1>${w_mu}</mu1>
+            <mu2>${w_mu}</mu2>
+            <kp>${w_kp}</kp>
+            <kd>1.0</kd>
+            <minDepth>0.01</minDepth>
+            <fdir1>1 0 0</fdir1>
+            <maxContacts value="64"/>
+        </gazebo>
+    </xacro:macro>
+
+    <xacro:limo_wheel_friction wheel="front_left_wheel"/>
+    <xacro:limo_wheel_friction wheel="front_right_wheel"/>
+    <xacro:limo_wheel_friction wheel="rear_left_wheel"/>
+    <xacro:limo_wheel_friction wheel="rear_right_wheel"/>
+
+    <gazebo>
+        <!--
+          发散的根因就在这里。gazebo_ros_control 与下面的 skid_steer 插件同时写这
+          4 个车轮关节：前者按 VelocityJointInterface + /gazebo_ros_control/pid_gains
+          施加力矩，把关节速度拉向 0（只加载了 limo_state_controller，是个只读的
+          joint_state_controller，没人给速度指令，命令值恒为 0），后者直接
+          SetVelocity 到目标转速。左右轮转速差越大对打越猛，w>1.5 rad/s 时一个
+          物理步内就把车弹成 pitch 75°、线速度 8740 m/s，接着 NaN，Gazebo 把非法
+          位姿钳成 (0,0,0) 并卡死 —— 就是"瞬移到原点"。
+
+          实测: mu=10/kp=1e7 + ros_control:=false -> 峰值 pitch 0.4°  OK
+                mu=1.0/kp=1e6 + ros_control:=true  -> 峰值 pitch 73.7° 发散
+
+          默认关掉。/joint_states 由 launch 里的 joint_state_publisher 提供。
+          要接真正的 ros_control 控制器（如 diff_drive_controller）时才开启，
+          届时须同时去掉 skid_steer 插件，否则照样对打。
+        -->
+        <xacro:arg name="ros_control" default="false"/>
+        <xacro:if value="$(arg ros_control)">
+            <plugin name="gazebo_ros_control" filename="libgazebo_ros_control.so">
+                <robotNamespace>$(arg robot_namespace)</robotNamespace>
+            </plugin>
+        </xacro:if>
+
+        <xacro:if value="${drive_mode == 'diff'}">
+            <plugin name="four_diff_controller" filename="libgazebo_ros_skid_steer_drive.so">
+                <updateRate>100.0</updateRate>
+                <robotNamespace>$(arg robot_namespace)</robotNamespace>
+                <leftFrontJoint>front_left_wheel</leftFrontJoint>
+                <rightFrontJoint>front_right_wheel</rightFrontJoint>
+                <leftRearJoint>rear_left_wheel</leftRearJoint>
+                <rightRearJoint>rear_right_wheel</rightRearJoint>
+                <wheelSeparation>0.172</wheelSeparation>
+                <wheelDiameter>0.09</wheelDiameter>
+                <robotBaseFrame>base_footprint</robotBaseFrame>
+                <commandTopic>cmd_vel</commandTopic>
+                <torque>50</torque>
+                <!-- <broadcastTF>true</broadcastTF> -->
+                <broadcastTF>true</broadcastTF>
+                <odometryTopic>odom</odometryTopic>
+                <odometryFrame>odom</odometryFrame>
+                <covariance_x>0.000100</covariance_x>
+                <covariance_y>0.000100</covariance_y>
+                <covariance_yaw>0.010000</covariance_yaw>
+            </plugin>
+        </xacro:if>
+
+        <!--
+          全向。odometryFrame/robotBaseFrame 与 skid_steer 保持一致(odom ->
+          base_footprint)，这样 NeuPAN 那边 map_frame=odom / base_frame=base_link
+          的 TF 查询两种模式下都成立，base_footprint -> base_link 由
+          robot_state_publisher 补。
+          planar_move 无条件广播 TF，没有 broadcastTF 开关。
+          cmdTimeout 不设(默认 -1，即关闭)：NeuPAN 到点后会持续发零速 Twist，
+          不需要死人开关，加了反而因为它比对的是 ros::Time 而 odom 用 sim time，
+          两个时钟容易误触发。
+        -->
+        <xacro:if value="${drive_mode == 'omni'}">
+            <plugin name="omni_controller" filename="libgazebo_ros_planar_move.so">
+                <robotNamespace>$(arg robot_namespace)</robotNamespace>
+                <commandTopic>cmd_vel</commandTopic>
+                <odometryTopic>odom</odometryTopic>
+                <odometryFrame>odom</odometryFrame>
+                <robotBaseFrame>base_footprint</robotBaseFrame>
+                <odometryRate>50.0</odometryRate>
+            </plugin>
+        </xacro:if>
+    </gazebo>
+</robot>

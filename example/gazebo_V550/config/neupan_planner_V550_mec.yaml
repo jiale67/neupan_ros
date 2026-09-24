@@ -1,0 +1,92 @@
+# wheeltec V550_mec（麦轮全向）NeuPAN 配置。
+#
+# 与 gazebo_limo 那两份的关系: 结构照抄 neupan_planner_limo_omni.yaml，
+# 差别只在 robot 段的 length/width，以及因尺寸变小而放宽的 collision_threshold。
+#
+# !! DUNE 权重不能复用 pretrain_limo/model_5000.pth !!
+# dune.py 里 G/h 由 length/width 算出，checkpoint 存的是拟合那一组 G/h 的网络权重。
+# limo 是 0.322 x 0.220，V550 是 0.260 x 0.245，矩阵**形状相同**，所以
+# load_state_dict 不会报错，会静默加载 —— 跑起来不崩，只是预测的碰撞距离是错的。
+# 必须用 example/dune_train/dune_train_V550_mec.py 重训。
+
+# mpc
+receding: 5
+step_time: 0.3
+ref_speed: 0.3
+device: 'cpu'
+# limo 上用 0.01，V550 更小更方，这个阈值容易在贴近障碍时出负 min_distance 触发
+# 停车。放到 0.05 先保证能跑通，之后再往下收。
+collision_threshold: 0.05
+
+# robot
+robot:
+  kinematics: 'omni'
+  # omni 下控制量是 u = (vx, vy)，**世界系**笛卡尔速度。
+  #
+  # 第一项 = 速度/加速度的**模长**上限（二阶锥约束，各向同性，就是对地速度）。
+  # 第二项对 omni **不再使用**，留着只为保持 [.., ..] 两元素的接口形状。
+  #   max_speed[0] = 1.0 m/s    对地速度上限
+  #   max_acce[0]  = 1.0 m/s^2  -> 每步允许变 1.0*step_time = 0.3 m/s
+  #                               ref_speed 就是 0.3，静止起步一步到位
+  #
+  # 改动历史: 原来是极坐标 u = (v, phi)，phi 是行进方向角，第二项 3.14 是
+  # phi 的界。那个参数化要线性化，而 max_acce[1]*step_time = 0.942 rad = 54deg
+  # 的信赖域远超泰勒展开有效范围，导致约 1Hz 方向角极限环（实测方向角
+  # std 22.9deg、弧长比 1.11）。笛卡尔模型是精确线性的，不存在这个问题，
+  # 加速度界也就回归它本来的物理含义，不再兼任信赖域半径。
+  max_speed: [1.0, 1.0]
+  max_acce: [1.0, 1.0]
+
+  # 横移代价相对前进代价的比例 (仅 omni)。实际权重 = lateral_ratio * adjust.p_u。
+  # simple_S1 绕 box_16 实测 (goal 6.0 3.5, 直线净空 ~0m 必须绕):
+  #   1.0  各向同性: 到达, 57.2s, v_along 均值 0.199。绕得动但明显偏慢,
+  #        因为横移和前进同价, 障碍物当前时减速比绕开便宜。
+  #   0.2  到达, 36.7s, v_along 均值 0.303, 横向偏离 0.37m,
+  #        轨迹离 box_16 最近 0.28m, v_perp std 0.0026。<- 取这个
+  #   0.0  到达, 36.3s, 但 |v| 冲到 0.60 (ref_speed 0.3), 障碍物附近速度方向
+  #        ±90 度跳变; omni_yaw_mode:=heading 时车头跟着甩 (累计 yaw 121 度
+  #        vs 0.2 时的 95 度)。
+  lateral_ratio: 0.2
+
+  # 以下两个数实测自 urdf + STL 包围盒，不是估的。base_link 系:
+  #   车体 base_link.STL   x[-0.1300, 0.1232]  y[-0.0778, 0.0778]
+  #   车轮 collision 圆柱  radius 0.0372 length 0.048，轮心 y=±0.0983
+  #     -> 轮外沿 y = 0.0983 + 0.048/2 = 0.1223（比车体宽，是最宽处）
+  #     -> 轮 x 向最远 0.0759 + 0.0372 = 0.1131（在车体 0.1232 以内，不影响长度）
+  #   整车包络 x[-0.1300, 0.1232]  y[-0.1223, 0.1223]
+  #
+  # NeuPAN 的矩形以 base_link 为**中心**且左右对称，所以不能直接填包络尺寸
+  # 0.2532 x 0.2446 —— 那样前后会各偏 3.4mm，车尾少算一截。取
+  #   length = 2*max(|xmin|,|xmax|) = 2*0.1300 = 0.2600
+  #   width  = 2*max(|ymin|,|ymax|) = 2*0.1223 = 0.2446
+  # 代价是车头方向多算 6.8mm 余量，宁可保守。
+  length: 0.26
+  width: 0.2446
+
+# initial path
+ipath:
+  interval: 0.09
+  waypoints: [[0, 0, 0], [5, 0, 0]]
+  curve_style: 'line'
+  min_radius: 0.0
+  loop: False
+  # limo 上是 1.0，会让车离终点 0.5m 就停。V550 车长 0.26，1.0 太大，收到 0.3。
+  arrive_threshold: 0.3
+  close_threshold: 0.1
+  arrive_index_threshold: 1
+
+# proximal alternating minimization network
+pan:
+  iter_num: 2
+  dune_max_num: 100
+  nrmp_max_num: 10
+  dune_checkpoint: None
+  iter_threshold: 0.1
+
+# adjust parameters
+adjust:
+  q_s: 0.3
+  p_u: 2.5
+  eta: 10.0
+  d_max: 0.15
+  d_min: 0.01

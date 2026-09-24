@@ -1,0 +1,52 @@
+# limo 全向(planar_move)配置。与 neupan_planner_limo.yaml 的差别只在 robot 段。
+#
+# DUNE 权重不用重训：checkpoint 里存的是 robot_G / robot_h，只由 length/width
+# 决定(0.322 x 0.22 的矩形轮廓)，运动学不参与 DUNE 训练。所以照旧用
+# pretrain_limo/model_5000.pth。改动 length/width 才需要重训。
+
+# mpc
+receding: 5
+step_time: 0.3
+ref_speed: 0.3
+device: 'cpu'
+time_print: False
+collision_threshold: 0.01
+
+# robot
+robot:
+  kinematics: 'omni'
+  # omni 下控制量是 u = (vx, vy)，**世界系**笛卡尔速度。
+  # 第一项 = 速度/加速度的**模长**上限（二阶锥，各向同性）。第二项不再使用。
+  # 原来是极坐标 u = (v, phi)，第二项 3.14 是方向角的界，而
+  # max_acce[1]*step_time = 0.942 rad = 54deg 的信赖域会引发方向角极限环。
+  max_speed: [1.0, 1.0]
+  max_acce: [1.0, 1.0]
+  length: 0.322
+  width: 0.22
+
+# initial path
+ipath:
+  interval: 0.09
+  waypoints: [[0, 0, 0], [5, 0, 0]]
+  curve_style: 'line'   # 'dubins' or reeds or line
+  min_radius: 0.0
+  loop: True
+  arrive_threshold: 1.0
+  close_threshold: 0.1
+  arrive_index_threshold: 1
+
+# proximal alternating minimization network
+pan:
+  iter_num: 2
+  dune_max_num: 100
+  nrmp_max_num: 10
+  dune_checkpoint: None
+  iter_threshold: 0.1
+
+# adjust parameters
+adjust:
+  q_s: 0.3
+  p_u: 2.5
+  eta: 10.0
+  d_max: 0.15
+  d_min: 0.01

@@ -1,0 +1,743 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="V550_mec_robot">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="-0.00658271210809724 0.000569960640804681 0.0414948422314003"
+        rpy="0 0 0" />
+      <mass
+        value="0.486844981490714" />
+      <inertia
+        ixx="0.000728879704405369"
+        ixy="-1.95581978182495E-06"
+        ixz="1.38866314723912E-05"
+        iyy="0.00137349892998219"
+        iyz="1.27363604508813E-06"
+        izz="0.00198018890840461" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.349019607843137 0.349019607843137 0.349019607843137 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="lf_wheel_link">
+    <!--
+      车轮质量/惯量为 SolidWorks 导出原值的 1/1000（原值写在注释里，见下）。
+      这不是笔误，是让 libgazebo_ros_planar_move.so 能正确跟踪角速度的必要条件，
+      理由见文件末尾 <gazebo> 段里"车轮惯量为何缩小 1000 倍"那段说明。
+      实车不读 urdf 的 inertial，只有 Gazebo 用，所以改这里不影响实车。
+      原值: mass=0.0575555911293518
+            ixx=2.10755821421772E-05 iyy=3.40216676430615E-05 izz=2.10755819831363E-05
+    -->
+    <inertial>
+      <origin
+        xyz="-7.70853984810582E-10 -0.00391716682736307 -1.4561503738908E-10"
+        rpy="0 0 0" />
+      <mass
+        value="5.75555911293518E-05" />
+      <inertia
+        ixx="2.10755821421772E-08"
+        ixy="-2.16920667058315E-16"
+        ixz="-1.66749355467763E-16"
+        iyy="3.40216676430615E-08"
+        iyz="-3.16177321306463E-17"
+        izz="2.10755819831363E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/lf_wheel_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.376470588235294 0.376470588235294 0.376470588235294 1" />
+      </material>
+    </visual>
+    <!--
+      碰撞体用圆柱近似（半径 0.0372 / 宽 0.048，实测自 lf_wheel_link.STL 包围盒），
+      不用 STL 网格。两个原因：
+        1. 麦轮网格约 2 万面，4 个轮子跟地面做 trimesh 接触又慢又不稳；
+           实测换成圆柱后角速度误差从 1.5% 降到 0.36%。
+        2. 麦轮滚子的各向异性摩擦本来就没建模（见文件末尾说明），
+           保留精细网格没有意义。
+      <visual> 仍用原网格，所以 rviz/Gazebo 里外观不变。
+    -->
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="1.5707963 0 0" />
+      <geometry>
+        <cylinder
+          radius="0.0372"
+          length="0.048" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="lf_wheel_joint"
+    type="continuous">
+    <origin
+      xyz="0.0759419119540792 0.0983014469516561 0.0167"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="lf_wheel_link" />
+    <axis
+      xyz="0 -1 0" />
+  </joint>
+  <link
+    name="lb_wheel_link">
+    <!--
+      同 lf_wheel_link：质量/惯量为原值的 1/1000。
+      原值: mass=0.0575546594328681
+            ixx=2.10751269181675E-05 iyy=3.40209427021929E-05 izz=2.10751450994036E-05
+    -->
+    <inertial>
+      <origin
+        xyz="8.27298508865315E-09 -0.00391801534011008 2.33900100711504E-08"
+        rpy="0 0 0" />
+      <mass
+        value="5.75546594328681E-05" />
+      <inertia
+        ixx="2.10751269181675E-08"
+        ixy="-1.20264905096543E-15"
+        ixz="-7.94357439958831E-15"
+        iyy="3.40209427021929E-08"
+        iyz="5.32083294576981E-15"
+        izz="2.10751450994036E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/lb_wheel_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.376470588235294 0.376470588235294 0.376470588235294 1" />
+      </material>
+    </visual>
+    <!--
+      碰撞体用圆柱近似（半径 0.0372 / 宽 0.048，实测自 lb_wheel_link.STL 包围盒），
+      不用 STL 网格。两个原因：
+        1. 麦轮网格约 2 万面，4 个轮子跟地面做 trimesh 接触又慢又不稳；
+           实测换成圆柱后角速度误差从 1.5% 降到 0.36%。
+        2. 麦轮滚子的各向异性摩擦本来就没建模（见文件末尾说明），
+           保留精细网格没有意义。
+      <visual> 仍用原网格，所以 rviz/Gazebo 里外观不变。
+    -->
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="1.5707963 0 0" />
+      <geometry>
+        <cylinder
+          radius="0.0372"
+          length="0.048" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="lb_wheel_joint"
+    type="continuous">
+    <origin
+      xyz="-0.0816580880459208 0.0983054469516561 0.0167"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="lb_wheel_link" />
+    <axis
+      xyz="0 1 0" />
+  </joint>
+  <link
+    name="rb_wheel_link">
+    <!--
+      同 lf_wheel_link：质量/惯量为原值的 1/1000。
+      原值: mass=0.0575555911293519
+            ixx=2.10755819418964E-05 iyy=3.40216676430614E-05 izz=2.10755821834171E-05
+    -->
+    <inertial>
+      <origin
+        xyz="7.24978507782303E-10 0.00391716682736308 2.99709913137436E-10"
+        rpy="0 0 0" />
+      <mass
+        value="5.75555911293519E-05" />
+      <inertia
+        ixx="2.10755819418964E-08"
+        ixy="-1.98892413173438E-16"
+        ixz="1.39806284049536E-16"
+        iyy="3.40216676430614E-08"
+        iyz="-9.21741113361527E-17"
+        izz="2.10755821834171E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/rb_wheel_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.376470588235294 0.376470588235294 0.376470588235294 1" />
+      </material>
+    </visual>
+    <!--
+      碰撞体用圆柱近似（半径 0.0372 / 宽 0.048，实测自 rb_wheel_link.STL 包围盒），
+      不用 STL 网格。两个原因：
+        1. 麦轮网格约 2 万面，4 个轮子跟地面做 trimesh 接触又慢又不稳；
+           实测换成圆柱后角速度误差从 1.5% 降到 0.36%。
+        2. 麦轮滚子的各向异性摩擦本来就没建模（见文件末尾说明），
+           保留精细网格没有意义。
+      <visual> 仍用原网格，所以 rviz/Gazebo 里外观不变。
+    -->
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="1.5707963 0 0" />
+      <geometry>
+        <cylinder
+          radius="0.0372"
+          length="0.048" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="rb_wheel_joint"
+    type="continuous">
+    <origin
+      xyz="-0.0816580880459208 -0.0982745530483439 0.0167"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="rb_wheel_link" />
+    <axis
+      xyz="0 1 0" />
+  </joint>
+  <link
+    name="rf_wheel_link">
+    <!--
+      同 lf_wheel_link：质量/惯量为原值的 1/1000。
+      原值: mass=0.0575546595056713
+            ixx=2.10751249334216E-05 iyy=3.40209423643432E-05 izz=2.1075146790306E-05
+    -->
+    <inertial>
+      <origin
+        xyz="-2.03118767638788E-08 0.00391801536357496 1.47898364041832E-08"
+        rpy="0 0 0" />
+      <mass
+        value="5.75546595056713E-05" />
+      <inertia
+        ixx="2.10751249334216E-08"
+        ixy="1.27911217452893E-15"
+        ixz="-5.19497190132298E-15"
+        iyy="3.40209423643432E-08"
+        iyz="-5.39837364479759E-15"
+        izz="2.1075146790306E-08" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/rf_wheel_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.376470588235294 0.376470588235294 0.376470588235294 1" />
+      </material>
+    </visual>
+    <!--
+      碰撞体用圆柱近似（半径 0.0372 / 宽 0.048，实测自 rf_wheel_link.STL 包围盒），
+      不用 STL 网格。两个原因：
+        1. 麦轮网格约 2 万面，4 个轮子跟地面做 trimesh 接触又慢又不稳；
+           实测换成圆柱后角速度误差从 1.5% 降到 0.36%。
+        2. 麦轮滚子的各向异性摩擦本来就没建模（见文件末尾说明），
+           保留精细网格没有意义。
+      <visual> 仍用原网格，所以 rviz/Gazebo 里外观不变。
+    -->
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="1.5707963 0 0" />
+      <geometry>
+        <cylinder
+          radius="0.0372"
+          length="0.048" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="rf_wheel_joint"
+    type="continuous">
+    <origin
+      xyz="0.0759419119540792 -0.0982785530483439 0.0167"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="rf_wheel_link" />
+    <axis
+      xyz="0 -1 0" />
+  </joint>
+  <link
+    name="camera_link">
+    <inertial>
+      <origin
+        xyz="-4.45004837215657E-08 -3.25846249904076E-07 -0.0139995077279642"
+        rpy="0 0 0" />
+      <mass
+        value="0.0285970249307156" />
+      <inertia
+        ixx="2.49063659552752E-05"
+        ixy="1.41446622396731E-09"
+        ixz="-3.44746104888009E-07"
+        iyy="8.10339394659798E-06"
+        iyz="8.7411817335606E-09"
+        izz="1.91138588188251E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/camera_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/camera_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="camera_joint"
+    type="fixed">
+    <origin
+      xyz="0.00160091195407919 -0.00010055304834393 0.152137"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="camera_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="laser_link">
+    <inertial>
+      <origin
+        xyz="0.000735465990626988 2.79287293896135E-07 -0.00549379656778799"
+        rpy="0 0 0" />
+      <mass
+        value="0.000111381912632097" />
+      <inertia
+        ixx="8.09810255937586E-10"
+        ixy="2.48436925682356E-14"
+        ixz="-2.38955091202816E-14"
+        iyy="8.09668177063905E-10"
+        iyz="-2.28917457095815E-15"
+        izz="1.17057115150887E-10" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/laser.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.376470588235294 0.376470588235294 0.376470588235294 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/laser.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="laser_joint"
+    type="fixed">
+    <origin
+      xyz="0.0834767944381037 1.32296970929568E-05 0.09655"
+      rpy="0 0 -3.14159265358979" />
+    <parent
+      link="base_link" />
+    <child
+      link="laser_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="controller_link">
+    <inertial>
+      <origin
+        xyz="-0.0254318317483443 0.0178325189887231 0.0120915107345509"
+        rpy="0 0 0" />
+      <mass
+        value="0.0371650711916722" />
+      <inertia
+        ixx="2.75273128086897E-05"
+        ixy="-4.90416948087793E-07"
+        ixz="-8.95619686706703E-08"
+        iyy="1.08853888864562E-05"
+        iyz="3.79055088929114E-07"
+        izz="3.7257082402319E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/controller_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://neupan_ros/example/gazebo_V550/meshes/controller_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="controller_joint"
+    type="fixed">
+    <origin
+      xyz="-0.0539080491826598 -0.011432266551253 0.1135"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="controller_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+
+  <!-- ==================== Gazebo 仿真配置 ==================== -->
+  <!--
+    以下 <gazebo> 标签只在 Gazebo 里生效。urdf 解析器（robot_state_publisher /
+    rviz / 实车那条链路）会直接忽略它们，所以加这些不影响实车。
+
+    全向移动用 libgazebo_ros_planar_move.so 实现：
+    直接给 base_link 施加平面速度，吃 cmd_vel 的 linear.x / linear.y / angular.z，
+    三个自由度都跟踪，小车能前后走、左右横移、原地自转。
+
+    为什么不做真实麦轮动力学：Gazebo Classic (noetic) 不带麦轮插件，滚子的各向
+    异性摩擦没法用 ODE 的 mu1/mu2 准确建模。planar_move 是"运动学全向"——速度直接
+    写进模型，速度跟踪几乎无误差，代价是车轮不由插件驱动（车轮靠地面摩擦被动滚，
+    见下面的摩擦设置，纯视觉效果）。工程上这是本仓库既有的做法，参见
+    limo_description/urdf/limo_four_diff.gazebo 里的 omni 模式。
+    车轮实际几乎不转（原因见下面摩擦那段），要视觉上转起来得另写节点发
+    /joint_states。
+
+    两个副作用，用之前必须知道：
+      1. planar_move 每个物理步把 z 线速度钳成 0，所以重力基本不起作用，小车不会
+         从高处落到地面。实测 spawn 在 z=0.5 时，它只掉到 0.312 就悬在空中不动了。
+         所以 spawn 的 z 必须直接给贴地值 0.02027（轮半径 0.0372 - 轮心相对
+         base_link 的高度 0.0167 = 0.0205，与 robot_model_visualization.launch 里
+         记的 V550_mec base_footprint 偏移 0.02027 一致）。
+         注意：贴地 spawn 时接触求解仍会赢过速度钳制，车体最终稳定在
+         base_link z ≈ 0.0183，比 spawn 值低约 1.8mm（minDepth 造成的接触穿透，
+         调 kp 到 1e6/1e7 没有改善，实测无关）。因此 base_footprint 会落在
+         z ≈ -0.002 而不是正好 0。2D 导航用不到这 2mm，不必纠正。
+      2. 速度是写进去的，不是靠接触力推的，撞上障碍物会挤进去而不是被顶住。
+         避障靠规划器保证，别指望仿真里的碰撞把车挡下来。
+
+
+    ============ 车轮惯量为何缩小 1000 倍（别改回去） ============
+
+    症状：直接挂 planar_move、车轮惯量用 SolidWorks 原值时，平移跟踪几乎无误差，
+    但角速度只有指令的 35%：下发 wz=1.0 实际只转 0.35 rad/s，wz=2.0 只转
+    0.78 rad/s —— 是个固定比例，不是固定偏差。
+
+    原因：planar_move 调的是 Model::SetLinearVel()，它把**同一个**线速度写给模型
+    里的每一个 link。但车体转动时，偏离转心的车轮本该有 v = v_base + w x r 这个
+    附加项，插件没给。于是 4 个车轮的速度是错的，ODE 靠关节约束去修正，这个修正
+    冲量反作用在 base_link 上，把转速拽了下来。稳态转速比就是角动量守恒：
+
+        ratio = Izz_base / (Izz_base + Σ[ k*m*(x²+y²) + k*izz ])
+
+    k=1   -> 预测 0.3462，实测 0.36    对得上
+    k=0.01  -> 预测 0.9815，实测 0.98
+    k=0.001 -> 预测 0.9981，实测 0.986
+
+    所以把车轮质量/惯量缩到 1/1000，让 Σ 项相对 Izz_base 可忽略，转速比就回到 1。
+    这么做是正当的：planar_move 根本不通过车轮力矩驱动车体，车轮在仿真里只是被地面
+    摩擦带着转的装饰件，它们的惯量不参与任何有意义的动力学。而且 SolidWorks 导出的
+    整车质量本来就只有 0.72 kg（base_link 0.487 kg），跟实车差远了，这些数从来不是
+    标定过的物理量。实车固件不读 urdf 的 inertial。
+
+    实测（3s 稳态窗口，与 gazebo 真值对比）：
+      wz = ±1.0 / 0.5 / 2.0    最大误差 0.0036 rad/s (0.36%)
+      vx/vy = ±0.3、斜走 0.25  最大误差 0.0004 m/s
+    试过但不行的方案：
+      - 只把车轮碰撞体换成圆柱、惯量不动 -> 转速仍是 0.35，无改善（惯量才是主因）
+      - 车轮摩擦全设 0                  -> 转速仍是 0.40，无改善（不是摩擦问题）
+      - 车轮关节改 fixed（整车并成单 link）-> 转速 0.82，仍差 18%，且 joint_state
+                                            插件找不到关节会段错误
+  -->
+
+  <!-- 外观。urdf 里 <visual> 的 rgba 在 Gazebo 里不生效，要用 <material> 指定 -->
+  <gazebo reference="base_link">
+    <material>Gazebo/DarkGrey</material>
+  </gazebo>
+  <gazebo reference="camera_link">
+    <material>Gazebo/White</material>
+  </gazebo>
+  <gazebo reference="laser_link">
+    <material>Gazebo/Grey</material>
+
+    <!--
+      2D 激光雷达。原 urdf 里 laser 只有 STL 外观，没有 <sensor>，所以 Gazebo 里
+      不出 /scan。这里补上。
+
+      本插件发 /scan_raw，经 laser_filters 剔除车体点后成为 /scan（见下面 plugin
+      处的说明）。/scan + frame laser 跟 params_costmap_common/costmap_common_params.yaml
+      里 obstacle_layer 的 scan 观测源对齐（topic: scan / sensor_frame: laser），
+      amcl.launch 和 algorithm_gmapping.launch 的 scan_topic 默认也是 scan。
+
+      参数按实车默认的镭神 M10P / N10 那一档给（wheeltec_lidar.launch 默认
+      rplidar_mode=ls_M10P_uart）：360° 扫一圈，10Hz，12m 量程。
+      costmap 只用到 obstacle_range 2.5 / raytrace_range 3.0，12m 够用。
+
+      用 libgazebo_ros_laser.so（CPU ray）而不是 libgazebo_ros_gpu_laser.so：
+      GPU 版要走离屏渲染，本机混合显卡(NVIDIA+AMD)下会阻塞物理循环，
+      limo 那边的深度相机就是因为这个被默认关掉的（见
+      limo_ros/limo_description/urdf/limo_four_diff.gazebo 的注释）。
+      360 线 CPU ray 开销很小，实测不影响实时率。
+
+      min 0.05: 雷达外壳网格在 x 方向伸到 0.045，而且 laser 是 fixed 关节，
+      urdf->sdf 时它的 collision 会并进 base_link，0.05 是为了跨过外壳自身。
+      不过实测下来挡光的其实不是外壳（见下），是车体。
+
+      ==== 车体自遮挡（实测，不是推测）====
+      雷达装在 base_link 前方 x=0.0835，而车体一直延伸到 x=-0.13，所以后半边有几段
+      被自己车体挡住。实测 <0.35m 的返回集中在这些 base_link 角度上：
+        ±92~96°     0.05~0.08m
+        ±142~147°   0.11~0.15m
+        170~180°    0.10~0.22m   （正后方，车体后壁约 0.21m 外）
+      对照实验：把 laser link 的 <collision> 整块删掉重测，被挡角度一模一样，
+      所以确认是车体几何，不是雷达外壳，也不是 min_range 设小了能解决的问题。
+
+      实车也有同样的遮挡，wheeltec_lidar.launch 里默认屏蔽了 30-60°/110-250°/
+      300-330°（雷达自己的顺时针约定）。把上面几段换算过去：
+        ±142~147° -> CW 142-147 / 212-218   已在 110-250 内，实车会丢掉
+        170~180°  -> CW 175-190             已在 110-250 内，实车会丢掉
+        ±92~96°   -> CW 92-96 / 264-268     实车没屏蔽，仿真里会留下近距点
+      仿真里这些自遮挡点由 laser_filters 的 LaserScanBoxFilter 统一剔掉
+      （scan_raw -> scan），不靠 costmap 的 footprint_clearing 兜底，也不在这里
+      改 min_angle/max_angle 开角度屏蔽——角度屏蔽是死的，车体轮廓不是圆的，
+      按矩形框剔才不会多切。参数和取值理由见
+      params_nav_common/laser_filter_V550_mec.yaml。
+    -->
+    <sensor type="ray" name="V550_laser_sensor">
+      <pose>0 0 0 0 0 0</pose>
+      <!-- true: gazebo 里能看到蓝色扫描扇面，方便确认雷达在转。不想看就改 false -->
+      <visualize>true</visualize>
+      <update_rate>10</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1</resolution>
+            <min_angle>-3.14159265</min_angle>
+            <max_angle>3.14159265</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.05</min>
+          <max>12.0</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </ray>
+      <!--
+        注意发的是 scan_raw 不是 scan。
+        gazebo_V550_mec.launch 里起了一个 laser_filters 节点做车体点剔除：
+          scan_raw  ==[LaserScanBoxFilter]==>  scan
+        下游（costmap/amcl/gmapping）拿到的是滤过的 scan，不用改任何配置。
+        所以单独 spawn 这个模型而不起那个滤波节点的话，是没有 /scan 的，
+        只有 /scan_raw。滤波参数见 params_nav_common/laser_filter_V550_mec.yaml。
+      -->
+      <plugin name="gazebo_ros_laser_controller" filename="libgazebo_ros_laser.so">
+        <robotNamespace>/</robotNamespace>
+        <topicName>scan_raw</topicName>
+        <frameName>laser_link</frameName>
+      </plugin>
+    </sensor>
+  </gazebo>
+  <gazebo reference="controller_link">
+    <material>Gazebo/White</material>
+  </gazebo>
+
+  <!--
+    车轮摩擦。planar_move 不驱动车轮关节，车轮是自由转动的 continuous 关节，
+    这里的摩擦只决定它们被地面带着转不转，跟车体运动无关（车体速度由插件直接写）。
+
+    fdir1="1 0 0" 把 mu1 定在车轮滚动方向（轮轴是 y，滚动方向就是 x），mu2 则是
+    侧向：
+      mu1=1.0 -> 前后走时地面能稍微带动车轮转
+      mu2=0.0 -> 横移时车轮侧向自由滑，这正是麦轮滚子的行为，也免得侧滑时
+                 车轮跟地面较劲抖动
+
+    注意车轮基本不转，别指望视觉效果：实测以 0.3 m/s 前进 3s（走了 0.9m，纯滚动
+    应该转约 24 rad），车轮只转了 0.5~0.6 rad。因为车轮质量被缩到 1/1000（见文件
+    末尾说明），压在地面上的法向力极小，摩擦力矩带不动它们。
+    要让 rviz 里的轮子转得像真的，得另写个节点按 cmd_vel 反解麦轮转速去发
+    /joint_states，本文件不做这件事。
+    kp/kd 用较软的 1e5/1.0：车轮被关节约束着不会掉下去，不需要硬接触，软一点
+    数值上更稳。
+  -->
+  <gazebo reference="lf_wheel_link">
+    <mu1>1.0</mu1>
+    <mu2>0.0</mu2>
+    <kp>100000.0</kp>
+    <kd>1.0</kd>
+    <minDepth>0.001</minDepth>
+    <fdir1>1 0 0</fdir1>
+    <material>Gazebo/Black</material>
+  </gazebo>
+  <gazebo reference="rf_wheel_link">
+    <mu1>1.0</mu1>
+    <mu2>0.0</mu2>
+    <kp>100000.0</kp>
+    <kd>1.0</kd>
+    <minDepth>0.001</minDepth>
+    <fdir1>1 0 0</fdir1>
+    <material>Gazebo/Black</material>
+  </gazebo>
+  <gazebo reference="lb_wheel_link">
+    <mu1>1.0</mu1>
+    <mu2>0.0</mu2>
+    <kp>100000.0</kp>
+    <kd>1.0</kd>
+    <minDepth>0.001</minDepth>
+    <fdir1>1 0 0</fdir1>
+    <material>Gazebo/Black</material>
+  </gazebo>
+  <gazebo reference="rb_wheel_link">
+    <mu1>1.0</mu1>
+    <mu2>0.0</mu2>
+    <kp>100000.0</kp>
+    <kd>1.0</kd>
+    <minDepth>0.001</minDepth>
+    <fdir1>1 0 0</fdir1>
+    <material>Gazebo/Black</material>
+  </gazebo>
+
+  <!--
+    全向移动插件。订阅 /cmd_vel (geometry_msgs/Twist)，发布 /odom 并广播
+    odom -> base_link 的 TF（planar_move 无条件广播，没有 broadcastTF 开关）。
+
+    robotBaseFrame 给 base_link 而不是 base_footprint：插件用的是 model 的世界
+    位姿，也就是根 link（base_link）的位姿。若这里填 base_footprint，再叠上实车
+    launch 里那条 base_footprint -> base_link (+0.02027) 静态 TF，base_link 在 TF
+    里会比 Gazebo 里的真实高度高 2cm，激光/相机帧跟着一起偏。填 base_link 则
+    odom -> base_link 就是真值。
+
+    代价是 base_footprint 得反过来挂在 base_link 下面（costmap 的
+    robot_base_frame=base_footprint 要用）。仿真 launch 里发这条静态 TF：
+      base_link -> base_footprint, xyz = "0 0 -0.02027"
+    父子方向跟实车 launch 相反，但 TF 查询不看方向，两边都成立。
+    注意：仿真时不要再起实车那条 base_to_link 静态 TF 节点，否则 base_link 会有
+    两个父节点，TF 树断裂。
+
+    cmdTimeout 不设（默认 -1，关闭）：导航到点后会持续发零速 Twist，不需要这个
+    死人开关；而且它比的是 ros::Time 而 odom 用 sim time，两个时钟容易误触发。
+  -->
+  <gazebo>
+    <plugin name="mecanum_omni_controller" filename="libgazebo_ros_planar_move.so">
+      <robotNamespace>/</robotNamespace>
+      <commandTopic>cmd_vel</commandTopic>
+      <odometryTopic>odom</odometryTopic>
+      <odometryFrame>odom</odometryFrame>
+      <robotBaseFrame>base_link</robotBaseFrame>
+      <odometryRate>50.0</odometryRate>
+    </plugin>
+  </gazebo>
+
+  <!--
+    /joint_states。planar_move 不管车轮关节，robot_state_publisher 又需要 4 个
+    continuous 关节的角度才能补出 base_link -> *_wheel_link 的 TF。
+    用这个插件把 Gazebo 里车轮的真实转角发出来（车轮靠地面摩擦被动滚，所以
+    rviz 里能看到轮子跟着转）。
+    也可以改用 joint_state_publisher 节点，但那个恒发 0，轮子在 rviz 里不会动。
+  -->
+  <gazebo>
+    <plugin name="gazebo_joint_state_publisher" filename="libgazebo_ros_joint_state_publisher.so">
+      <robotNamespace>/</robotNamespace>
+      <jointName>lf_wheel_joint, rf_wheel_joint, lb_wheel_joint, rb_wheel_joint</jointName>
+      <updateRate>50.0</updateRate>
+    </plugin>
+  </gazebo>
+</robot>

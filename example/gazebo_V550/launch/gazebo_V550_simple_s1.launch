@@ -1,0 +1,130 @@
+<launch>
+  <!--
+    NeuPAN + V550_mec（麦轮全向）仿真环境。
+    从 turn_on_wheeltec_robot/launch/gazebo_V550_mec.launch 迁移过来，并把世界
+    换成与 gazebo_limo_simple_s1.launch 相同的 Autonomous_navigation_exploration
+    世界文件，两台车现在跑同一套场景，结果可以直接对比。
+
+      roslaunch neupan_ros gazebo_V550_simple_s1.launch
+      roslaunch neupan_ros neupan_gazebo_V550.launch
+
+    世界可选: mix_D1_new / simple_S1 / dense_S2 / mix_D1 / corridor / maze
+      roslaunch neupan_ros gazebo_V550_simple_s1.launch world:=simple_S1 x:=0 y:=0
+
+    注意文件名里的 simple_s1 与默认世界 mix_D1_new 不一致 —— 这是沿用
+    gazebo_limo_simple_s1.launch 的命名（它也是这样），改名会打断和 limo 的对应
+    关系，所以保持原样。实际加载哪个世界看 world 参数。
+
+    验证全向移动（三个自由度都能跟踪）：
+      rostopic pub -r 10 /cmd_vel geometry_msgs/Twist '{linear: {x: 0.3}}'   # 前进
+      rostopic pub -r 10 /cmd_vel geometry_msgs/Twist '{linear: {y: 0.3}}'   # 左横移
+      rostopic pub -r 10 /cmd_vel geometry_msgs/Twist '{angular: {z: 1.0}}'  # 原地转
+      rostopic echo /odom/twist/twist                                       # 看跟踪结果
+
+    键盘遥控：
+      rosrun teleop_twist_keyboard teleop_twist_keyboard.py
+
+    2D 激光雷达（urdf 里 laser_link 上的 ray 传感器）：
+      rostopic hz /scan          # 10Hz
+      rostopic echo /scan -n1    # frame_id=laser_link, 360点, 0.05~12m
+    话题名 scan 跟 costmap_common_params.yaml 的观测源、amcl/gmapping 的
+    scan_topic 默认值一致，NeuPAN 订的也是它，全链路不需要 remap。
+    车体后半边有几段自遮挡（雷达装在车头，车体挡住后方），由下面的
+    laser_body_filter 剔除，详见 urdf 和 laser_filter_V550_mec.yaml 里的说明。
+  -->
+
+  <arg name="gui" default="true"/>
+
+  <!-- 世界。给名字即可，也可以用 world_name 直接给完整路径 -->
+  <arg name="world" default="mix_D1_new"/>
+  <arg name="world_name"
+       default="$(find neupan_ros)/example/gazebo_V550/world/$(arg world).world"/>
+ 
+
+  <!--
+    初始位姿。默认与 limo 相同的 (-3,-3)，便于两台车对比。
+
+    不要用 (0,0)：mix_D1_new 在原点附近 0.9 m 就有障碍物（d1_static_l_h 在
+    (-0.58,0.68)），车体半对角是 0.179 m，虽然不至于生成时穿模，但一起步就贴着
+    障碍物，看不出规划效果。(-3,-3) 处最近障碍物边界有 1.54 m 净空。
+
+    这个世界里的障碍物高度都是 0~0.45/0.5 m，V550 雷达在 z≈0.117 m，扫得到。
+  -->
+  <arg name="x"   default="-3.0"/>
+  <arg name="y"   default="-3.0"/>
+  <arg name="yaw" default="0.0"/>
+
+  <!--
+    z 必须是贴地值 0.02027，不能像差速车那样给个高度让它自己掉下来。
+    planar_move 每个物理步把 z 线速度钳成 0，重力基本不生效：实测 spawn 在 z=0.5
+    时小车只掉到 0.312 就悬在空中不动了。
+    0.02027 = 轮半径 0.0372 - 轮心相对 base_link 的高度 0.0167，与
+    robot_model_visualization.launch 里记的 V550_mec base_footprint 偏移一致。
+    贴地 spawn 后车体会稳定在 base_link z ≈ 0.0183（接触穿透 1.8mm），
+    于是 base_footprint 落在 z ≈ -0.002。2D 导航用不到这 2mm。
+  -->
+  <arg name="z" default="0.02027"/>
+
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="world_name"   value="$(arg world_name)"/>
+    <arg name="paused"       value="false"/>
+    <arg name="use_sim_time" value="true"/>
+    <arg name="gui"          value="$(arg gui)"/>
+    <arg name="headless"     value="false"/>
+    <arg name="debug"        value="false"/>
+  </include>
+
+  <param name="robot_description"
+         textfile="$(find neupan_ros)/example/gazebo_V550/urdf/V550_mec_robot.urdf"/>
+
+  <node name="spawn_V550_mec" pkg="gazebo_ros" type="spawn_model"
+        args="-x $(arg x) -y $(arg y) -z $(arg z) -Y $(arg yaw)
+              -unpause -urdf -param robot_description -model V550_mec"/>
+
+  <!--
+    base_link -> *_wheel_link / laser_link / camera_link 的 TF。
+    /joint_states 由 urdf 里的 gazebo_ros_joint_state_publisher 插件提供，
+    所以这里不需要再起 joint_state_publisher 节点。
+  -->
+  <node name="robot_state_publisher" pkg="robot_state_publisher"
+        type="robot_state_publisher"/>
+
+  <!--
+    base_footprint。costmap 的 robot_base_frame 用的是它，但 urdf 里没有这个 link
+    （实车是靠 robot_model_visualization.launch 里的静态 TF 补的）。
+
+    这里父子方向跟实车那条相反：实车是 base_footprint -> base_link (+0.02027)，
+    仿真里是 base_link -> base_footprint (-0.02027)。原因是 planar_move 广播的
+    odom -> base_link 已经把 base_link 定在真实位姿上了，base_link 不能再有第二个
+    父节点。TF 查询不看父子方向，costmap 那边一样能用。
+
+    所以：仿真时不要再起实车那条 base_to_link 静态 TF 节点。
+  -->
+  <node pkg="tf" type="static_transform_publisher" name="base_link_to_footprint"
+        args="0 0 -0.02027 0 0 0 base_link base_footprint 100"/>
+
+  <!--
+    激光雷达滤波：剔除打在车体自身上的点。
+      urdf 里的 ray 插件发 /scan_raw  ->  本节点  ->  /scan
+
+    下游（NeuPAN、costmap 的观测源、amcl、gmapping）用的都是 /scan，所以它们不用
+    改任何配置，拿到的就是滤过的数据。
+
+    用 LaserScanBoxFilter 按车体矩形轮廓剔，不用 RangeFilter 一刀切：
+    车体各方向到雷达的距离差很大（正前 0.040m，正后 0.214m），一刀切要设
+    min_range=0.23 才能滤净后方，代价是车头前方 0.19m 的真实障碍物全丢。
+    取值理由详见 laser_filter_V550_mec.yaml。
+
+    想看滤掉了什么，对比这两个话题：
+      rostopic echo /scan_raw -n1
+      rostopic echo /scan     -n1
+    rviz 里可以同时加两个 LaserScan 显示，一个 /scan_raw 一个 /scan。
+  -->
+  <node pkg="laser_filters" type="scan_to_scan_filter_chain"
+        name="laser_body_filter" output="screen">
+    <rosparam command="load"
+              file="$(find neupan_ros)/example/gazebo_V550/params_nav_common/laser_filter_V550_mec.yaml"/>
+    <remap from="scan"          to="scan_raw"/>
+    <remap from="scan_filtered" to="scan"/>
+  </node>
+</launch>

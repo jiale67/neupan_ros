@@ -1,8 +1,22 @@
 <launch>
 
-    <arg name="config_file" default= '$(find neupan_ros)/example/gazebo_limo/config/neupan_planner_limo.yaml'/>
+    <!--
+      drive_mode: diff | omni。必须与 gazebo_limo_simple_s1.launch 的 drive_mode
+      一致，否则 planner 的解算模型和 Gazebo 的驱动插件不匹配。
+        diff -> neupan_planner_limo.yaml       (kinematics: diff)
+        omni -> neupan_planner_limo_omni.yaml  (kinematics: omni)
+      两份 yaml 只差 robot 段，DUNE checkpoint 共用（权重只由 length/width 决定，
+      运动学不参与 DUNE 训练）。
+      直接给 config_file 可以覆盖这个选择。
+    -->
+    <arg name="drive_mode" default="diff"/>
+    <arg name="config_file" default= "$(eval find('neupan_ros') + '/example/gazebo_limo/config/neupan_planner_limo_omni.yaml' if arg('drive_mode') == 'omni' else find('neupan_ros') + '/example/gazebo_limo/config/neupan_planner_limo.yaml')"/>
     <arg name="map_frame" default='odom'/>
     <arg name="base_frame" default='base_link'/>
+    <!--
+      lidar_frame: 雷达 frame。limo 和 V550_mec 现在统一叫 laser_link
+      （V550 原来是 laser）。
+    -->
     <arg name="lidar_frame" default='laser_link'/>
     <arg name="scan_range" default='0.0 5.0'/>
     <arg name="scan_angle_range" default='-3.14 3.14'/>
@@ -11,6 +25,44 @@
     <arg name="scan_downsample" default='6'/>
     <arg name="dune_checkpoint" default='$(find neupan_ros)/example/gazebo_limo/pretrain_limo/model_5000.pth'/>
     <arg name="refresh_initial_path" default='false'/>
+
+    <!--
+      omni 下的朝向控制，只在 drive_mode:=omni 时起作用。
+      NeuPAN 的 omni 模型不含朝向(A=I, B 第三行 [0,0])，规划器不可能输出角速度，
+      所以这一环加在规划器外面。当帧避障不受影响：DUNE 每帧按实际 theta 把激光点
+      转到车体系，车转到哪个角度碰撞距离就按那个角度算。
+        heading -> 车头对准行进方向，看起来像普通车在开（默认）
+        spin    -> 固定角速度自转，麦轮原地打转效果
+        none    -> 不转，保持 spawn 朝向蟹步平移
+
+      但它不是开环：雷达 FOV 只有 ±120°(limo_gazebo.gazebo)，车一转盲区跟着转，
+      DUNE 的输入点集就变，规划出的 phi 又反过来驱动转向。所以下面三个参数的
+      作用都是把朝向环压到明显慢于规划器(step_time 0.3s)，否则两个环互相追着
+      走，车头就会左右晃。
+    -->
+    <arg name="omni_yaw_mode" default='heading'/>
+    <arg name="omni_yaw_gain" default='1.5'/>
+    <arg name="omni_yaw_max" default='1.0'/>
+    <arg name="omni_spin_speed" default='0.8'/>
+    <arg name="omni_yaw_min_speed" default='0.02'/>
+    <!--
+      朝向参考的一阶低通时间常数，秒。参考本身在抖：omni yaml 的 max_acce 第二项
+      是每步方向角变化上限，3.14 意味着一步内方向可以掉头，规划器输出的 phi 逐帧
+      跳变，车头忠实追它就是摇头。
+      调大 -> 车头更稳但会明显滞后于行进方向(0.6 实测夹角均值到过 68.7°，
+      看着像蟹行)；调小 -> 跟得紧但会晃。0.3 是实测的平衡点。
+    -->
+    <arg name="omni_yaw_tau" default='0.3'/>
+    <!--
+      朝向误差死区，rad。误差小于它就不发角速度，消掉持续微幅修正造成的抖动。
+      0.12 rad ≈ 7°，这个量级的朝向偏差视觉上看不出来。
+    -->
+    <arg name="omni_yaw_deadband" default='0.12'/>
+    <!--
+      角加速度上限 rad/s^2。限制 angular.z 本身的变化率，即使参考突变车头也是
+      匀加速转过去，不会一拍之内从 +1 翻到 -1。
+    -->
+    <arg name="omni_yaw_accel" default='2.0'/>
 
     <!--
       goal: 终点，"X Y" 或 "X Y THETA"（THETA 弧度，默认 0）。坐标系是 map_frame
@@ -23,6 +75,64 @@
       例: roslaunch neupan_ros neupan_gazebo_limo.launch goal:="8 6"
     -->
     <arg name="goal" default=''/>
+
+    <!--
+      waypoints: 全局路径折线，格式 "X Y [THETA]; X Y [THETA]; ..."。
+      THETA 省略时按"指向下一个点"自动补（curve_style='line' 下 waypoint 的 theta
+      就是该段行进方向，所以不能想当然填 0）。
+
+      优先级: waypoints > goal > yaml 的 ipath.waypoints。给了 waypoints，goal
+      和 yaml waypoints 都不起作用。
+
+      默认值就是 gazebo_limo_simple_s1.launch 的起点 (-3,-3) 出发依次经过
+      (4,0) -> (0,2) -> (-1,0) -> 回到 (-3,-3) 的闭合折线。起点不用写，
+      waypoints_include_start 会把机器人当前实际位姿前置进去。
+
+      注意折线已经首尾闭合，所以 loop 要保持 false：loop=true 会再追加一次首点，
+      末尾多出零长段。想让它一圈圈跑，用 refresh_initial_path 或到点后重发。
+    -->
+    <arg name="waypoints" default="4 0; 0 2; -1 0; -3 -3"/>
+
+    <!--
+      是否把机器人当前位姿前置为折线第一个点。
+        true  -> 只写要经过的点（默认）
+        false -> waypoints 第一个点就是路径起点。外部全局规划器给的路径通常
+                 已经从当前位置起算，此时置 false，否则会多一段当前位姿->首点。
+      同时作用于 ~waypoints 参数和 /neupan_waypoints 话题。
+    -->
+    <arg name="waypoints_include_start" default='true'/>
+
+    <!--
+      wait_for_start: true 则节点起来后先原地待命，收到启动信号才开跑。
+
+      为什么要它: rviz 加载慢(本机实测约 14.7 s)，而规划器拿到第一帧 TF 就立刻
+      开始发速度，等可视化出来车已经走了一段。这个开关把开跑时机交给人。
+
+      待命期间 /neupan_initial_path 和 /robot_marker 照常每拍发布，所以 rviz
+      一加载出来就能看到完整的全局路径折线，确认没问题再点开始。
+      待命期间持续发零速度，不是"不发"——gazebo 驱动插件会保持上一条 cmd_vel。
+
+      两种启动方式:
+        1. rviz 工具栏点 2D Nav Goal，然后在地图上点一下（点哪里都行，见下）
+        2. rostopic pub -1 /neupan_start std_msgs/Bool "data: true"
+      发 data: false 可以随时暂停回待命状态。
+    -->
+    <arg name="wait_for_start" default='true'/>
+
+    <!--
+      start_trigger_mode: 收到 2D Nav Goal 时怎么解释它。
+        trigger -> 只当"开始"按钮，点击位置被忽略，~waypoints 折线保持不变（默认）
+        goal    -> 点击位置就是终点，按 当前位姿 -> 点击点 重建一条直线路径并开跑
+
+      这里默认 trigger，因为本文件的全局路径是 ~waypoints 给的折线，
+      要是按 goal 解释，点一下就把折线换成一条直线了。
+      注意 neupan_core.py 里这个参数的默认值是 goal（保持其他 example 的原行为），
+      trigger 是本文件显式设的。
+
+      trigger 模式下运行中再点不会改路径，只会 warn 提示。想运行中换路径:
+      发 /neupan_waypoints 并设 refresh_initial_path:=true。
+    -->
+    <arg name="start_trigger_mode" default='trigger'/>
 
     <!--
       loop: 覆盖 yaml 的 ipath.loop。
@@ -44,8 +154,19 @@
         <param name="dune_checkpoint" value="$(arg dune_checkpoint)"/>
         <param name="refresh_initial_path" value="$(arg refresh_initial_path)"/>
         <param name="goal" value="$(arg goal)"/>
+        <param name="waypoints" value="$(arg waypoints)"/>
+        <param name="waypoints_include_start" value="$(arg waypoints_include_start)"/>
+        <param name="wait_for_start" value="$(arg wait_for_start)"/>
+        <param name="start_trigger_mode" value="$(arg start_trigger_mode)"/>
         <param name="loop" value="$(arg loop)"/>
-        <remap from="/scan" to="/limo/scan"/>
+        <param name="omni_yaw_mode" value="$(arg omni_yaw_mode)"/>
+        <param name="omni_yaw_gain" value="$(arg omni_yaw_gain)"/>
+        <param name="omni_yaw_max" value="$(arg omni_yaw_max)"/>
+        <param name="omni_spin_speed" value="$(arg omni_spin_speed)"/>
+        <param name="omni_yaw_min_speed" value="$(arg omni_yaw_min_speed)"/>
+        <param name="omni_yaw_tau" value="$(arg omni_yaw_tau)"/>
+        <param name="omni_yaw_deadband" value="$(arg omni_yaw_deadband)"/>
+        <param name="omni_yaw_accel" value="$(arg omni_yaw_accel)"/>
         <remap from="/neupan_cmd_vel" to="/cmd_vel"/>
         <remap from="/neupan_goal" to="/move_base_simple/goal"/>
     </node>

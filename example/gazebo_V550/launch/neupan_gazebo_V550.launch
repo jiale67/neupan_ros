@@ -1,0 +1,161 @@
+<launch>
+
+    <!--
+      NeuPAN 规划器 + wheeltec V550_mec（麦轮全向）。
+
+      配套仿真环境用同目录的 gazebo_V550_simple_s1.launch，两个终端:
+        roslaunch neupan_ros gazebo_V550_simple_s1.launch
+        roslaunch neupan_ros neupan_gazebo_V550.launch
+
+      !! 首次使用前必须先训 DUNE !!
+      V550 是 0.260 x 0.2446，limo 是 0.322 x 0.220，不能复用 pretrain_limo
+      的权重（形状相同会静默加载，只是碰撞距离算错，不会报错）。
+        cd $(rospack find neupan)/../example/dune_train    # 或直接进 NeuPAN/example/dune_train
+        python3 dune_train_V550_mec.py
+      训完把产物路径填到下面的 dune_checkpoint。
+    -->
+
+    <arg name="config_file"
+         default="$(find neupan_ros)/example/gazebo_V550/config/neupan_planner_V550_mec.yaml"/>
+
+    <!--
+      DUNE 权重。默认指向 pretrain_V550_mec/model_5000.pth，训练产物需要手动拷到
+      这里，或者启动时用 dune_checkpoint:=/绝对/路径 覆盖。
+      文件不存在时 NeuPAN 会提示是否现场训练，别误按 y —— 训练要几十分钟，
+      而且会落在 sys.path[0]/model 下，不是这里。
+    -->
+    <arg name="dune_checkpoint"
+         default="$(find neupan_ros)/example/gazebo_V550/pretrain_V550_mec/model_5000.pth"/>
+
+    <!--
+      TF frame。三个都与 gazebo_V550_simple_s1.launch 里实际广播的一致:
+        odom       <- planar_move 插件（urdf 里 odometryFrame）
+        base_link  <- planar_move 插件（urdf 里 robotBaseFrame，注意不是
+                      base_footprint，V550 这边父子方向与实车相反，见 gazebo
+                      launch 里的说明）
+        laser_link <- robot_state_publisher 从 urdf 的 laser_joint 发出
+    -->
+    <arg name="map_frame"   default='odom'/>
+    <arg name="base_frame"  default='base_link'/>
+    <arg name="lidar_frame" default='laser_link'/>
+
+    <!--
+      scan 处理。V550 雷达: 360 点 / 10 Hz / 量程 0.05~12 m / FOV ±180°(全周)。
+
+      scan_range 上限给 8.0 而不是雷达能到的 12.0: pan.dune_max_num=100 限制了
+      每帧送进 DUNE 的点数，放到 12m 会让远处大量无关点挤掉近处的关键点。
+
+      scan_angle_range 给全周。V550 与 limo 的一个实质差别: limo 只有 ±120°
+      FOV，车一转盲区跟着转；V550 是 360°，不存在这个耦合。
+
+      scan_downsample=3 -> 360/3=120 点，与 limo 现在(720/6=120)的量级持平。
+
+      车体自遮挡不用在这里操心: urdf 的 ray 插件发 /scan_raw，gazebo launch 里的
+      laser_body_filter 按车体轮廓剔完才发 /scan。这里订的就是干净数据。
+      **不要**改成订 /scan_raw —— 车尾 0.214m 内打在自己身上的点会被 DUNE 当成
+      障碍物，车会以为自己被贴住。
+    -->
+    <arg name="scan_range"       default='0.0 8.0'/>
+    <arg name="scan_angle_range" default='-3.15 3.15'/>
+    <arg name="scan_downsample"  default='3'/>
+
+    <arg name="marker_size" default='0.05'/>
+    <arg name="marker_z"    default='0.3'/>
+    <arg name="refresh_initial_path" default='false'/>
+
+    <!--
+      朝向控制。先按"只控 Vx/Vy、不管车头朝向"跑通，所以取 none。
+
+      NeuPAN 的 omni 模型结构上就不含朝向: linear_omni_model 的 A 是单位阵、
+      B 第三行是 [0,0]，代价函数 omni 分支只算 diff_s[0:2]。也就是说规划器
+      不可能输出角速度，angular.z 恒为 0 不是 bug。omni_yaw_* 那一套是加在
+      规划器**外面**的补偿环，none 时 omni_yaw_rate() 直接返回 0.0。
+
+      现象: 小车保持 spawn 时的朝向做蟹步平移，车头不会转向行进方向。
+      麦轮本身就能这么走，避障也不受影响（DUNE 每帧按实际 theta 把激光点转到
+      车体系，朝向是多少就按多少算碰撞）。
+
+      想让车头跟着走再改成 heading。注意 limo 那边为压制"摇头"调的一套参数
+      (tau=0.3 / deadband=0.12) 是针对 ±120° FOV 的转向-观测耦合，V550 是
+      360° 雷达，不存在那个耦合，那套值可能过于保守导致车头明显滞后。
+      具体数值需要实测，我没有 V550 上的测量结果。
+    -->
+    <arg name="omni_yaw_mode" default='none'/>
+
+    <!--
+      终点，"X Y" 或 "X Y THETA"。坐标系是 map_frame(=odom)。
+
+      odom 原点就是 Gazebo 世界原点，**与 spawn 位置无关** —— planar_move 插件
+      直接用模型的世界位姿发 odom，不是从 spawn 处重新起算。实测 spawn 在
+      (-3,-3) 时 /odom/pose/pose 读到的就是 (-3.000,-3.000)。所以这里填的是
+      世界坐标，不是"相对车头多远"。
+
+      留空则沿用 yaml 里的 ipath.waypoints（默认 [[0,0,0],[5,0,0]]）。
+
+      默认给 3 0: 从 spawn 点 (-3,-3) 到 (3,0) 约 6.7m，直线会穿过 mix_D1_new
+      中间的 C 形障碍物群（直线最小净空 0 m），必须绕行才能到 —— 正好用来看
+      NeuPAN 的避障效果。想先跑无障碍直线可以用 goal:="0 -3"。
+      例: roslaunch neupan_ros neupan_gazebo_V550.launch goal:="3 0"
+    -->
+    <arg name="goal" default='3 0'/>
+
+    <!--
+      全局路径折线，"X Y [THETA]; X Y [THETA]; ..."。给了它 goal 就不起作用。
+      默认留空 —— 空世界里先用 goal 走直线验证链路，折线等换到有障碍物的世界
+      再用。
+    -->
+    <arg name="waypoints" default=''/>
+    <arg name="waypoints_include_start" default='true'/>
+
+    <!--
+      启动等待。true 则节点起来后原地待命，收到启动信号才开跑，避免 rviz 还没
+      加载出来车已经走了一段。两种触发方式:
+        1. rviz 工具栏点 2D Nav Goal，在地图上点一下（trigger 模式下点哪都行）
+        2. rostopic pub -1 /neupan_start std_msgs/Bool "data: true"
+      发 data: false 可以随时暂停回待命（待命期间持续发零速度，能真停住）。
+    -->
+    <arg name="wait_for_start" default='true'/>
+
+    <!--
+      trigger -> 2D Nav Goal 只当"开始"按钮，点击位置忽略，已有路径不变
+      goal    -> 点击位置即终点，重建 当前位姿->点击点 的直线并开跑
+      这里给 goal: 空世界里用鼠标随手指目标比改 launch 参数方便。
+      改用 ~waypoints 折线时应该换成 trigger，否则一次误点就把折线换成直线。
+    -->
+    <arg name="start_trigger_mode" default='goal'/>
+
+    <arg name="loop" default='false'/>
+
+    <node name='neupan_control' pkg="neupan_ros" type="neupan_node.py" output="screen">
+        <param name="config_file"      value="$(arg config_file)"/>
+        <param name="dune_checkpoint"  value="$(arg dune_checkpoint)"/>
+        <param name="map_frame"        value="$(arg map_frame)"/>
+        <param name="base_frame"       value="$(arg base_frame)"/>
+        <param name="lidar_frame"      value="$(arg lidar_frame)"/>
+        <param name="scan_range"       value="$(arg scan_range)"/>
+        <param name="scan_angle_range" value="$(arg scan_angle_range)"/>
+        <param name="scan_downsample"  value="$(arg scan_downsample)"/>
+        <param name="marker_size"      value="$(arg marker_size)"/>
+        <param name="marker_z"         value="$(arg marker_z)"/>
+        <param name="refresh_initial_path" value="$(arg refresh_initial_path)"/>
+        <param name="goal"             value="$(arg goal)"/>
+        <param name="waypoints"        value="$(arg waypoints)"/>
+        <param name="waypoints_include_start" value="$(arg waypoints_include_start)"/>
+        <param name="wait_for_start"      value="$(arg wait_for_start)"/>
+        <param name="start_trigger_mode"  value="$(arg start_trigger_mode)"/>
+        <param name="loop"             value="$(arg loop)"/>
+        <param name="omni_yaw_mode"    value="$(arg omni_yaw_mode)"/>
+
+        <!--
+          /scan 不需要 remap: V550 的雷达（经 laser_filters 后）就发在 /scan，
+          NeuPAN 订的默认名也是 /scan。
+          /cmd_vel 同理是 planar_move 插件的 commandTopic 默认名。
+        -->
+        <remap from="/neupan_cmd_vel" to="/cmd_vel"/>
+        <remap from="/neupan_goal"    to="/move_base_simple/goal"/>
+    </node>
+
+    <node name="rviz" pkg="rviz" type="rviz"
+          args="-d $(find neupan_ros)/example/gazebo_V550/rviz/V550_gazebo.rviz"/>
+
+</launch>
