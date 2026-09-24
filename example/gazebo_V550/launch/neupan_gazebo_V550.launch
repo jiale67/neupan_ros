@@ -68,9 +68,14 @@
 
       omni3 的控制量是 u = (vx, vy, w)，角速度由规划器直接算出：linear_omni3_model
       的 B 第三行是 [0,0,dt]，theta 是可控状态并进入状态代价，所以车头朝向是 MPC
-      在 horizon 里和平移一起优化的，参考就是路径的行进方向。
+      在 horizon 里和平移一起优化的。
       generate_twist_msg 在 omni3 下直接下发 opt_vel 的第三维，完全绕过
       omni_yaw_rate()。
+
+      朝向**参考**取哪条线由 yaml 的 ipath.heading_ref 决定，不在这里配：
+        path -> 全局初始路径的方向（绕障时 yaw 几乎不动，纯蟹行）
+        plan -> 规划轨迹 /neupan_plan 的行进方向（V550 现在用这个）
+      见 ../HEADING_REF.md。
 
       这个参数只对 kinematics: 'omni'（2 自由度，u = (vx, vy)）有意义 —— 那个模型
       B 第三行是 [0,0]，theta 结构上不可控，角速度只能靠规划器**外面**的补偿环补。

@@ -99,6 +99,29 @@ ipath:
   close_threshold: 0.1
   arrive_index_threshold: 1
 
+  # 车头朝向的**参考**从哪来。只对 omni3 有意义（omni 的 theta 不可控，
+  # diff/acker 车头恒等于行进方向）。
+  #
+  #   path -> 全局初始路径上参考点的方向（upstream 行为）
+  #   plan -> 规划器当前这条轨迹（/neupan_plan）的行进方向  <- 取这个
+  #
+  # 为什么改成 plan：omni3 的 theta 确实是可控状态、也确实进了状态代价
+  # （robot.C0_cost 的 diff_s 全三行），但它跟踪的是**全局路径**方向。
+  # _ensure_consistent_angles 把路径每点的 theta 设成"指向下一个路径点"，于是
+  # 绕障时车体已经横移出去，朝向参考却还在说"对准全局直线"：朝向偏差约为 0，
+  # w 也就约为 0，绕障全靠 vx/vy 蟹行 —— 这正是实测到的"避障过程中 yaw 几乎
+  # 不变"。换成 plan 后参考是规划轨迹自己的行进方向，车头跟着绕障轨迹一起摆。
+  #
+  # 这是一个闭环（朝向 -> 几何/观测 -> 规划 -> 朝向），不是纯观感补偿。V550 上
+  # 这个闭环比 limo 温和得多，两个原因：雷达 360° FOV（limo 只有 ±120°，车一转
+  # 盲区跟着转），车体 0.26 x 0.2446 近乎正方（转起来迎风面几乎不变）。
+  heading_ref: 'plan'
+
+  # plan 模式下规划速度模长低于这个值就认为方向不可辨识（atan2 基本是噪声），
+  # 该步退回路径方向。终点附近速度自然衰减到 0，朝向参考于是平滑回到路径方向，
+  # 停车时不会原地乱转；第一帧 cur_vel_array 全零，也走这条路按路径方向起步。
+  heading_speed_threshold: 0.02
+
 # proximal alternating minimization network
 pan:
   iter_num: 2
