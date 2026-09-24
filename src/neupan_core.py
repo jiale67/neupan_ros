@@ -62,9 +62,13 @@ class neupan_core:
         self.flip_angle = rospy.get_param("~flip_angle", False)
         self.include_initial_path_direction = rospy.get_param("~include_initial_path_direction", False)
 
-        # ~omni_yaw_mode: omni 下机器人朝向怎么控制。NeuPAN 的 omni 模型不管朝向
-        # (robot.py 的 linear_omni_model: A=I，B 第三行 [0,0]，theta 不可控)，
-        # 所以角速度只能在规划器外面补。
+        # ~omni_yaw_mode: **仅 kinematics: 'omni'（2 自由度）** 下机器人朝向怎么
+        # 控制。那个模型不管朝向 (robot.py 的 linear_omni_model: A=I，B 第三行
+        # [0,0]，theta 不可控)，所以角速度只能在规划器外面补。
+        #
+        # kinematics: 'omni3' 不用这一套 —— 它的控制量是 u = (vx, vy, w)，
+        # 角速度由规划器直接算出，下面所有 omni_yaw_* 参数对它**全部不生效**
+        # (见 generate_twist_msg)。V550 现在用的就是 omni3。
         #   none    -> 不发角速度，保持 spawn 朝向蟹步平移（原行为）
         #   heading -> 车头对准行进方向，看起来像普通车在开（默认）
         #   spin    -> 以固定角速度自转，麦轮小车原地打转那种效果
@@ -843,10 +847,12 @@ class neupan_core:
 
         action = Twist()
 
-        if self.neupan_planner.robot.kinematics == "omni":
-            # omni 下 neupan.__call__ 返回的已经是 (vx, vy)，而且是**世界系**的：
-            # 它由 opt_vel 的 (v, phi) 算出，phi 是世界系行进方向角
-            # (neupan.py 的 omni 分支 / initial_path.omni_model 都按世界系积分)。
+        kinematics = self.neupan_planner.robot.kinematics
+
+        if kinematics in ("omni", "omni3"):
+            # omni/omni3 下 neupan.__call__ 返回的已经是**世界系**笛卡尔速度
+            # (vx, vy) / (vx, vy, w)，见 neupan.py 的 cartesian_vel 分支与
+            # robot.linear_omni*_model。
             #
             # gazebo_ros_planar_move 把 linear.x/y 当**车体系**用，UpdateChild 里
             # 按当前 yaw 转到世界系再 SetLinearVel。所以这里必须先转到车体系，
@@ -856,7 +862,24 @@ class neupan_core:
 
             action.linear.x = vx_w * cos(theta) + vy_w * sin(theta)
             action.linear.y = -vx_w * sin(theta) + vy_w * cos(theta)
-            action.angular.z = self.omni_yaw_rate(vx_w, vy_w, theta)
+
+            if kinematics == "omni3":
+                # 角速度是**规划器算出来的**: omni3 的 B 第三行是 [0,0,dt]，
+                # theta 是可控状态且进代价函数(C0_cost 的 diff_s 全三行)，
+                # 所以车头朝向由 MPC 在 horizon 里统一优化，和平移一起满足
+                # 避障约束。
+                #
+                # 这里**不能**再叠加 omni_yaw_rate(): 那个补偿环是给 2 自由度
+                # omni 用的外挂 P 控制器，与规划器目标不同(它追瞬时速度方向，
+                # 规划器追参考路径朝向)，两个环同时作用就是互相打架。
+                # omni_yaw_* 参数对 omni3 全部不生效。
+                #
+                # 角速度在平面上世界系与车体系同值(都绕 z)，不需要坐标转换。
+                action.angular.z = vel[2, 0]
+                # slew 状态留在零位，这样 omni3 -> 暂停 -> 恢复不会有残留。
+                self.omni_yaw_last_rate = 0.0
+            else:
+                action.angular.z = self.omni_yaw_rate(vx_w, vy_w, theta)
         else:
             action.linear.x = vel[0, 0]
             action.angular.z = vel[1, 0]

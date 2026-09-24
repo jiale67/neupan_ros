@@ -64,21 +64,17 @@
     <arg name="refresh_initial_path" default='false'/>
 
     <!--
-      朝向控制。先按"只控 Vx/Vy、不管车头朝向"跑通，所以取 none。
+      朝向控制。**V550 现在用 kinematics: 'omni3'，这个参数对它不起作用。**
 
-      NeuPAN 的 omni 模型结构上就不含朝向: linear_omni_model 的 A 是单位阵、
-      B 第三行是 [0,0]，代价函数 omni 分支只算 diff_s[0:2]。也就是说规划器
-      不可能输出角速度，angular.z 恒为 0 不是 bug。omni_yaw_* 那一套是加在
-      规划器**外面**的补偿环，none 时 omni_yaw_rate() 直接返回 0.0。
+      omni3 的控制量是 u = (vx, vy, w)，角速度由规划器直接算出：linear_omni3_model
+      的 B 第三行是 [0,0,dt]，theta 是可控状态并进入状态代价，所以车头朝向是 MPC
+      在 horizon 里和平移一起优化的，参考就是路径的行进方向。
+      generate_twist_msg 在 omni3 下直接下发 opt_vel 的第三维，完全绕过
+      omni_yaw_rate()。
 
-      现象: 小车保持 spawn 时的朝向做蟹步平移，车头不会转向行进方向。
-      麦轮本身就能这么走，避障也不受影响（DUNE 每帧按实际 theta 把激光点转到
-      车体系，朝向是多少就按多少算碰撞）。
-
-      想让车头跟着走再改成 heading。注意 limo 那边为压制"摇头"调的一套参数
-      (tau=0.3 / deadband=0.12) 是针对 ±120° FOV 的转向-观测耦合，V550 是
-      360° 雷达，不存在那个耦合，那套值可能过于保守导致车头明显滞后。
-      具体数值需要实测，我没有 V550 上的测量结果。
+      这个参数只对 kinematics: 'omni'（2 自由度，u = (vx, vy)）有意义 —— 那个模型
+      B 第三行是 [0,0]，theta 结构上不可控，角速度只能靠规划器**外面**的补偿环补。
+      留在这里是为了配置文件切回 'omni' 时不用改 launch。
     -->
     <arg name="omni_yaw_mode" default='none'/>
 
