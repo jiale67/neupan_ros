@@ -21,6 +21,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
 import os
+import time
 from math import sin, cos, atan2, hypot, copysign, isfinite, sqrt
 
 import numpy as np
@@ -42,11 +43,131 @@ from nav_msgs.msg import Path
 from visualization_msgs.msg import MarkerArray, Marker
 from sensor_msgs.msg import LaserScan
 
-from neupan import neupan
-from neupan.util import get_transform, WrapToPi
+# neupan（以及它带进来的 torch）不在模块顶层导入，而是在节点里绑完核、设完线程数
+# 之后由 import_neupan() 导入: torch 的 OpenMP 线程池在第一次使用时按当时的环境
+# 变量和 CPU 亲和性创建，先导入再绑核就晚了。
+neupan = None
+get_transform = None
+WrapToPi = None
 
 
 TF_EXCEPTIONS = (LookupException, ConnectivityException, ExtrapolationException)
+
+
+def parse_cpu_list(value):
+
+    """
+    "4,5" / "3-5" / "2,4-5" / [4, 5] / 5 -> 排好序的核编号列表；"" / [] -> []。
+    """
+
+    if isinstance(value, bool):
+        raise ValueError("cpu_affinity expects core ids, got bool: %r" % value)
+
+    if isinstance(value, int):
+        return [value]
+
+    if not isinstance(value, str):
+        return sorted({int(v) for v in value})
+
+    cores = set()
+
+    for part in value.replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            cores.update(range(int(lo), int(hi) + 1))
+        else:
+            cores.add(int(part))
+
+    return sorted(cores)
+
+
+def pin_process(cores, nice):
+
+    """
+    把本进程**所有已存在的线程**绑到 cores，并把 nice 设成给定值。
+
+    os.sched_setaffinity / setpriority 在 Linux 上是按线程生效的，只设主线程的话
+    rclpy/DDS 已经起好的线程不受约束，所以遍历 /proc/self/task 逐个设。之后新建的
+    线程（torch OpenMP、OpenBLAS、diffcp 等）从创建它的线程继承亲和性和 nice。
+
+    返回 (成功绑核的线程数, nice 失败的原因或 None)。
+    """
+
+    pinned = 0
+    nice_error = None
+
+    for tid in os.listdir("/proc/self/task"):
+        tid = int(tid)
+
+        try:
+            if cores:
+                os.sched_setaffinity(tid, cores)
+            pinned += 1
+
+            if nice is not None:
+                os.setpriority(os.PRIO_PROCESS, tid, nice)
+
+        except ProcessLookupError:
+            # 线程在 listdir 之后退出了
+            continue
+
+        except PermissionError as e:
+            # 调低 nice（提高优先级）需要 CAP_SYS_NICE，普通用户只能往大调
+            nice_error = str(e)
+
+    return pinned, nice_error
+
+
+def import_neupan(num_threads):
+
+    """
+    设好线程相关环境变量后再导入 torch / neupan。
+
+    OMP_WAIT_POLICY=PASSIVE: libgomp 的工作线程在没活干时默认会自旋忙等一段时间，
+    50 Hz 的规划循环下几乎一直在自旋，表现就是这几个核持续 100%。改成 PASSIVE 让
+    它们空闲时睡眠。
+    """
+
+    global neupan, get_transform, WrapToPi
+
+    if num_threads > 0:
+        for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                    "NUMEXPR_NUM_THREADS"):
+            os.environ[key] = str(num_threads)
+
+    os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+
+    import torch
+
+    if num_threads > 0:
+        torch.set_num_threads(num_threads)
+        try:
+            # 推理里没有可并行的独立算子，inter-op 线程池给 1 就够
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            # 已经有并行工作跑过之后不能再改，忽略
+            pass
+
+    from neupan import neupan as _neupan
+    from neupan.util import get_transform as _get_transform, WrapToPi as _WrapToPi
+
+    neupan, get_transform, WrapToPi = _neupan, _get_transform, _WrapToPi
+
+    limiter = None
+
+    if num_threads > 0:
+        # numpy 的 OpenBLAS 在 import numpy 时就按核数建好了线程池（rclpy 等更早
+        # 导入了 numpy，环境变量对它已经无效），用 threadpoolctl 在运行时收紧。
+        # threadpoolctl 随 scikit-learn 安装（NeuPAN 的依赖），没有就跳过。
+        try:
+            from threadpoolctl import threadpool_limits
+            limiter = threadpool_limits(limits=num_threads)
+        except ImportError:
+            pass
+
+    return torch.get_num_threads(), limiter
 
 
 class neupan_core(Node):
@@ -68,6 +189,23 @@ class neupan_core(Node):
         #
         # 所有参数都按 dynamic_typing 声明，取值后再自己转类型，yaml 里写
         # 3 / 3.0 / "3"、true / "true" 都能用。
+
+        # ---------- CPU 资源隔离，必须最先做（在导入 torch 之前） ----------
+        self.setup_cpu(
+            cpu_affinity=self.param("cpu_affinity", ""),
+            num_threads=int(self.param("num_threads", 0)),
+            nice=int(self.param("nice", 0)),
+        )
+
+        # 控制循环频率 Hz。NeuPAN 的 MPC 步长是 step_time（0.3 s），控制量不需要
+        # 50 Hz 刷新；一次规划耗时超过周期时定时器会背靠背连续触发，主线程那个核
+        # 就一直 100%。
+        self.control_frequency = float(self.param("control_frequency", 20.0))
+        if self.control_frequency <= 0.0:
+            raise ValueError(
+                "control_frequency must be > 0, got: %r" % self.control_frequency
+            )
+
         self.planner_config_file = self.resolve_pkg_path(
             self.param("config_file", "config/neupan_planner_V550_mec.yaml")
         )
@@ -186,6 +324,9 @@ class neupan_core(Node):
         self.active = False
         # 最近一次收到 scan 的时间（节点时钟），None 表示还没收到过
         self.last_scan_time = None
+        # 规划耗时统计（秒），周期性打印后清零
+        self.plan_times = []
+        self.plan_stats_t0 = time.monotonic()
 
         # publisher
         self.vel_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
@@ -226,8 +367,75 @@ class neupan_core(Node):
         )
         self.log_waiting_goal()
 
-        # 控制循环 50 Hz
-        self.timer = self.create_timer(1.0 / 50.0, self.control_loop)
+        self.timer = self.create_timer(1.0 / self.control_frequency, self.control_loop)
+
+    # ------------------------------------------------------------------
+    # CPU 资源隔离
+    # ------------------------------------------------------------------
+    def setup_cpu(self, cpu_affinity, num_threads, nice):
+
+        """
+        Jetson 上 NeuPAN（torch + cvxpy）会把能用的核全部吃满，饿死同机的
+        EKF / 底盘串口 / 雷达驱动，表现为定位崩溃。这里把本进程限制在指定核上，
+        定位等进程独占其余核。
+
+          cpu_affinity: 绑定的核，"4,5" / "3-5"，空 = 不绑
+          num_threads:  torch/OpenMP/BLAS 线程数，0 = 绑定的核数（不绑核时保持库默认）
+          nice:         进程 nice 值 0~19，越大优先级越低，0 = 不改
+        """
+
+        log = self.get_logger()
+        cores = parse_cpu_list(cpu_affinity)
+
+        if cores:
+            if not hasattr(os, "sched_setaffinity"):
+                log.warn("cpu_affinity: os.sched_setaffinity unavailable on this OS, skipped")
+                cores = []
+            else:
+                available = sorted(os.sched_getaffinity(0))
+                invalid = [c for c in cores if c not in available]
+
+                if invalid:
+                    log.warn(
+                        f"cpu_affinity: cores {invalid} not available "
+                        f"(this machine: {available}), ignored"
+                    )
+                    cores = [c for c in cores if c in available]
+
+                if not cores:
+                    log.error(
+                        f"cpu_affinity: no valid core in {cpu_affinity!r}, NOT pinned. "
+                        f"available cores: {available}"
+                    )
+                elif cores == available:
+                    log.warn(
+                        f"cpu_affinity {cores} covers all cores, "
+                        "localization is not isolated from NeuPAN"
+                    )
+
+        if num_threads <= 0 and cores:
+            num_threads = len(cores)
+
+        nice = nice if nice > 0 else None
+
+        if (cores or nice is not None) and hasattr(os, "sched_setaffinity"):
+            pinned, nice_error = pin_process(cores, nice)
+
+            if nice_error:
+                log.warn(f"nice {nice} not applied: {nice_error}")
+        else:
+            pinned = 0
+
+        torch_threads, self.thread_limiter = import_neupan(num_threads)
+
+        log.info(
+            f"CPU: affinity={cores if cores else 'all'} "
+            f"(pinned {pinned} threads, now {sorted(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else '?'}), "
+            f"torch threads={torch_threads}, "
+            f"blas limit={'%d (threadpoolctl)' % num_threads if self.thread_limiter is not None else 'env only'}, "
+            f"nice={os.getpriority(os.PRIO_PROCESS, 0) if hasattr(os, 'getpriority') else '?'}, "
+            f"OMP_WAIT_POLICY={os.environ.get('OMP_WAIT_POLICY')}"
+        )
 
     # ------------------------------------------------------------------
     # 参数工具
@@ -337,6 +545,31 @@ class neupan_core(Node):
 
         return (self.get_clock().now() - self.last_scan_time).nanoseconds * 1e-9
 
+    def record_plan_time(self, dt):
+
+        """每 10 s 打印一次规划耗时；平均耗时超过控制周期时打 warn，用来调 control_frequency。"""
+
+        self.plan_times.append(dt)
+        now = time.monotonic()
+
+        if now - self.plan_stats_t0 < 10.0:
+            return
+
+        times = np.array(self.plan_times) * 1000.0
+        period_ms = 1000.0 / self.control_frequency
+        msg = (
+            f"planning time over {len(times)} cycles: avg {times.mean():.1f} ms, "
+            f"max {times.max():.1f} ms (control period {period_ms:.1f} ms)"
+        )
+
+        if times.mean() > period_ms:
+            self.get_logger().warn(msg + ", planner cannot keep up, lower control_frequency")
+        else:
+            self.get_logger().info(msg)
+
+        self.plan_times = []
+        self.plan_stats_t0 = now
+
     # ------------------------------------------------------------------
     # 控制循环
     # ------------------------------------------------------------------
@@ -394,7 +627,9 @@ class neupan_core(Node):
                 throttle_duration_sec=1.0,
             )
 
+        t_plan = time.monotonic()
         action, info = self.neupan_planner(self.robot_state, self.obstacle_points)
+        self.record_plan_time(time.monotonic() - t_plan)
 
         self.stop = info["stop"]
         self.arrive = info["arrive"]
