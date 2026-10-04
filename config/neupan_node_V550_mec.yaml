@@ -1,0 +1,76 @@
+# neupan_node 参数（wheeltec V550_mec 实车）。
+# 由 launch/neupan_V550_mec.launch.py 加载；也可以启动时换一份:
+#   ros2 launch neupan_ros neupan_V550_mec.launch.py params_file:=/path/to/xxx.yaml
+#
+# 底盘和雷达不由本包启动，先在另一个终端运行:
+#   ros2 launch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch.py
+
+neupan_node:
+  ros__parameters:
+
+    # ---------- 规划器 ----------
+    # 相对路径按 neupan_ros 的 share 目录（install/neupan_ros/share/neupan_ros）解析，
+    # 也可以写绝对路径。
+    config_file: config/neupan_planner_V550_mec.yaml
+    # DUNE 权重按车体尺寸 (length/width) 训练，不能跨车复用。文件不存在节点直接报错。
+    dune_checkpoint: model/pretrain_V550_mec/model_5000.pth
+    # 覆盖规划器 yaml 的 ipath.loop。必须 false: loop=true 时到点后折返无限往复，
+    # 不会回到等待目标点状态。写 "" 则沿用规划器 yaml。
+    loop: false
+
+    # ---------- 话题 ----------
+    # lslidar 驱动 laserscan_topic
+    scan_topic: /scan
+    # wheeltec_robot_node 订阅，linear.x / linear.y / angular.z 都生效（车体系）
+    cmd_vel_topic: /cmd_vel
+    # 目标点，rviz2 工具栏 "2D Goal Pose" 发的话题。收到并校验通过后才开始规划
+    goal_topic: /goal_pose
+
+    # ---------- 坐标系 ----------
+    # robot_localization EKF 的 world_frame，发布 odom_combined -> base_footprint
+    # （融合轮速 vx/vy + IMU）。目标点就在这个坐标系里解释，rviz2 Fixed Frame 设成它；
+    # 目标点 frame_id 是别的坐标系时节点会用 TF 转换过来。
+    map_frame: odom_combined
+    # 车体中心，与 base_link 平面上重合（只差 z=0.01974），NeuPAN 车体矩形以它为中心
+    base_frame: base_footprint
+    # lslidar 驱动 frame_id；base_footprint -> laser 静态 TF 由 robot_mode_description
+    # 按 turn_on_wheeltec_robot/config/robot_model.yaml 的 V550_mec.base_to_laser 发布
+    lidar_frame: laser
+
+    # ---------- scan 处理 ----------
+    # 不做车体剔除滤波: lslidar 驱动已按 wheeltec_param.yaml 的 angle_disable_min/max
+    # 把车体后方角度裁掉（填 inf），节点丢弃非有限值。
+    #
+    # 使用的量程 [min, max] m，再与驱动的 range_min/range_max（lslidar min_range=0.15）
+    # 取交集。上限给 8 m: pan.dune_max_num=100 限制了每帧送进 DUNE 的点数，量程太大
+    # 会让远处无关点挤掉近处关键点。
+    scan_range: [0.0, 8.0]
+    # 使用的角度范围 [min, max] rad，雷达系
+    scan_angle_range: [-3.15, 3.15]
+    # 每隔几束取一束
+    scan_downsample: 3
+    # 扫描角是否反向（雷达倒装时用）
+    flip_angle: false
+    # 规划中超过这么久 (s) 没收到 scan 就发零速度；目标点校验也要求 scan 在此时间内。
+    # <=0 关闭
+    scan_timeout: 0.5
+
+    # ---------- 目标点校验 ----------
+    # 目标点离当前位置超过此距离 (m) 则拒绝，防止 rviz 误点到远处。<=0 不限制
+    max_goal_distance: 10.0
+
+    # ---------- 可视化 ----------
+    marker_size: 0.05
+    marker_z: 0.3
+
+    # ---------- omni（2 自由度）朝向补偿环 ----------
+    # 只对规划器 yaml 里 kinematics: 'omni' 有效。V550 用 omni3，角速度由规划器直接
+    # 给出，下面这组参数不生效。
+    omni_yaw_mode: none        # none | heading | spin
+    omni_yaw_gain: 1.5
+    omni_yaw_max: 1.0
+    omni_yaw_min_speed: 0.02
+    omni_yaw_tau: 0.3
+    omni_yaw_deadband: 0.12
+    omni_yaw_accel: 2.0
+    omni_spin_speed: 0.8

@@ -1,13 +1,11 @@
-# wheeltec V550_mec（麦轮全向）NeuPAN 配置。
+# wheeltec V550_mec（麦轮全向）NeuPAN 配置，实车 ROS 2 用。
 #
-# 与 gazebo_limo 那两份的关系: 结构照抄 neupan_planner_limo_omni.yaml，
-# 差别只在 robot 段的 length/width，以及因尺寸变小而放宽的 collision_threshold。
+# 参数值是在 Gazebo 仿真里调出来的（实测记录见 doc/V550_sim_notes.md），
+# 实车尺寸与仿真 urdf 一致，所以直接沿用；上实车后速度类参数建议先保守。
 #
-# !! DUNE 权重不能复用 pretrain_limo/model_5000.pth !!
-# dune.py 里 G/h 由 length/width 算出，checkpoint 存的是拟合那一组 G/h 的网络权重。
-# limo 是 0.322 x 0.220，V550 是 0.260 x 0.245，矩阵**形状相同**，所以
-# load_state_dict 不会报错，会静默加载 —— 跑起来不崩，只是预测的碰撞距离是错的。
-# 必须用 example/dune_train/dune_train_V550_mec.py 重训。
+# DUNE 权重 model/pretrain_V550_mec/model_5000.pth 是按下面 robot.length/width 训的。
+# 改了 length/width 必须用 NeuPAN/example/dune_train/dune_train_V550_mec.py 重训 ——
+# checkpoint 的矩阵形状不随尺寸变，换尺寸后旧权重会静默加载、碰撞距离算错，不会报错。
 
 # mpc
 receding: 5
