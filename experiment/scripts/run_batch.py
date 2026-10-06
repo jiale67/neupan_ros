@@ -32,6 +32,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -60,6 +61,7 @@ HASHED_FILES = [
 ]
 TOKEN_VAR = 'EXP_RUNNER_TOKEN'
 STOP_SIGINT_WAIT = 20.0
+INTERRUPT_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 
 class AbortBatch(RuntimeError):
@@ -136,18 +138,23 @@ def crash_json(trial, reason, meta, attempt):
 # ------------------------------------------------------------------------------------ run_one
 def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None, ready=None,
             ready_timeout=120.0, clock_timeout=120.0, reset=None, poll=0.1, log_path=None,
-            attempt=1, goal_gap=0.2, exit_grace=10.0):
+            attempt=1, goal_gap=0.2, exit_grace=10.0, precheck=None, goal_subscribers=None):
     """Run one trial; return its outcome ('success', 'collision', 'timeout', 'stuck', 'crash').
 
     launcher(trial, out_dir, meta_json, log_path) -> handle with poll() (None while running)
     and stop(); clock_source() -> latest /clock seconds or None; goal_pub(x, y) publishes one
     goal (frame odom); ready() -> True once the planner published /cmd_vel since the launch;
-    reset() clears clock/ready state right before the launch. wall_timeout is the time allowed
-    after the goal (default timeout*1.5+90). Sim times are relative to the first /clock value of
-    this launch (sim time does not start at 0).
+    reset() clears clock/ready state right before the launch; precheck(trial) runs before any
+    old result is deleted (may raise AbortBatch); goal_subscribers() -> number of subscribers of
+    the goal topic (stored in meta). wall_timeout is the time allowed after the goal (default
+    timeout*1.5+90). Sim times are relative to the first /clock value of this launch (sim time
+    does not start at 0). Any exception except AbortBatch/KeyboardInterrupt is turned into a
+    crash json (reason=repr(e)) after the launch has been stopped.
     """
     if wall_timeout is None:
         wall_timeout = wall_timeout_for(trial)
+    if precheck:
+        precheck(trial)                  # before deleting anything: an abort keeps the old json
     json_path, stale = _result_paths(out_dir, trial.trial_id)
     os.makedirs(out_dir, exist_ok=True)
     for p in stale:                      # an old result must never pass for this attempt
@@ -155,12 +162,13 @@ def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None,
             os.remove(p)
     meta = trial_meta(trial, attempt)
     t_wall0 = time.time()
-    if reset:
-        reset()
-    handle = launcher(trial, out_dir, json.dumps(meta), log_path)
-    alive = lambda: handle.poll() is None  # noqa: E731
+    handle = None
     reason = None
     try:
+        if reset:
+            reset()
+        handle = launcher(trial, out_dir, json.dumps(meta), log_path)
+        alive = lambda: handle.poll() is None  # noqa: E731
         # 1. /clock of this launch (first value = sim-time origin of the trial)
         if _wait_until(lambda: clock_source() is not None, clock_timeout, poll, alive) != 'ok':
             reason = ('launch exited (rc=%s) before /clock appeared' % handle.poll()
@@ -193,6 +201,8 @@ def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None,
                 goal_pub(float(trial.goal[0]), float(trial.goal[1]))
                 if i < 2:
                     time.sleep(goal_gap)
+            if goal_subscribers is not None:
+                meta['goal_subscribers'] = int(goal_subscribers())
             # 5. wait for the recorder's json (or exit / wall timeout)
             res = []
 
@@ -214,32 +224,45 @@ def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None,
                     r['meta'] = {'recorder_meta': r['meta']}
                 r['meta'].update({k: meta[k] for k in
                                   ('late_start', 'actual_start_offset', 'first_clock',
-                                   'wall_goal_time', 'attempt') if k in meta})
+                                   'wall_goal_time', 'attempt', 'goal_subscribers')
+                                  if k in meta})
                 r['attempts'] = attempt
                 r['wall_s'] = time.time() - t_wall0
                 _atomic_json(json_path, r)
                 if exit_grace > 0:       # the launch ends by itself once the recorder is done
                     _wait_until(lambda: handle.poll() is not None, exit_grace, poll)
                 return r.get('outcome', 'unknown')
+    except (AbortBatch, KeyboardInterrupt):
+        raise
+    except Exception as e:  # noqa: BLE001 - one bad trial must not halt the batch
+        sys.stderr.write('trial %s raised:\n%s' % (trial.trial_id, traceback.format_exc()))
+        reason = repr(e)
     finally:
-        handle.stop()
+        if handle is not None:
+            handle.stop()
     # no recorder json: record the trial as a crash with the reason
+    if meta.get('goal_subscribers', 2) < 2:
+        meta['crash_detail'] = reason
+        reason = 'goal subscribers < 2'
     meta['wall_s'] = time.time() - t_wall0
     _atomic_json(json_path, crash_json(trial, reason, meta, attempt))
     return 'crash'
 
 
 def run_trial(trial, out_dir, launcher, clock_source, goal_pub, retries=1, **kw):
-    """Skip trials that already have a non-crash json; retry crashes up to 1+retries attempts."""
+    """Skip trials that already have a complete non-crash json (meta.attempt set by the runner); retry crashes up to 1+retries attempts."""
     json_path = _result_paths(out_dir, trial.trial_id)[0]
     existing = load_result(json_path)
     attempts = 0
     outcome = None
     if existing is not None:
         outcome = existing.get('outcome')
-        if outcome != 'crash':
-            return outcome
-        attempts = int(existing.get('attempts', 1))
+        meta = existing.get('meta')
+        if outcome == 'crash':
+            attempts = int(existing.get('attempts', 1))
+        elif isinstance(meta, dict) and 'attempt' in meta:
+            return outcome          # complete: recorder json patched by this runner
+        # else: recorder json the runner never finished (killed before patching) -> run again
     while attempts < 1 + retries:
         attempts += 1
         outcome = run_one(trial, out_dir, launcher, clock_source, goal_pub, attempt=attempts, **kw)
@@ -285,8 +308,12 @@ def pids_with_token(token):
     return out
 
 
+def is_gzserver(comm):
+    return bool(comm) and comm.startswith('gzserver')
+
+
 def running_gzservers():
-    return [p for p in _proc_pids() if _proc_comm(p) == 'gzserver' and _proc_alive(p)]
+    return [p for p in _proc_pids() if is_gzserver(_proc_comm(p)) and _proc_alive(p)]
 
 
 class Proc:
@@ -337,19 +364,25 @@ class Proc:
         left = pids_with_token(self.token)
         if left:
             names = [(p, _proc_comm(p)) for p in left]
-            if any(n == 'gzserver' for _, n in names):
+            if any(is_gzserver(n) for _, n in names):
                 raise AbortBatch('gzserver of this runner survived SIGKILL: %s' % names)
             sys.stderr.write('warning: processes survived stop: %s\n' % names)
         self.log.close()
 
 
+def check_no_foreign_gzserver(trial):
+    """Every launch of this runner is stopped (and verified) before the next one starts, so any
+    gzserver running now belongs to someone else: abort instead of touching it."""
+    foreign = running_gzservers()
+    if foreign:
+        raise AbortBatch('gzserver not started by this runner is running (pids %s); refusing '
+                         'to start trial %s (not touching other sessions)'
+                         % (foreign, trial.trial_id))
+
+
 def make_launcher():
     def launcher(trial, out_dir, meta_json, log_path):
-        foreign = running_gzservers()
-        if foreign:
-            raise AbortBatch('gzserver not started by this runner is running (pids %s); refusing '
-                             'to start trial %s (not touching other sessions)'
-                             % (foreign, trial.trial_id))
+        check_no_foreign_gzserver(trial)
         argv = ['roslaunch', 'neupan_ros', 'exp_trial.launch',
                 'method:=%s' % trial.method, 'world:=%s' % trial.world,
                 'x:=%r' % float(trial.start[0]), 'y:=%r' % float(trial.start[1]),
@@ -360,10 +393,34 @@ def make_launcher():
     return launcher
 
 
+ROSCORE_PARAMS = ('/rosdistro', '/rosversion')
+
+
+def top_namespaces(names):
+    return {n.split('/')[1] for n in names if n.startswith('/') and len(n) > 1}
+
+
+def reset_params(get_names, delete, baseline_top, owns_master):
+    """Drop parameters left by the previous trial's launch.
+    Own roscore: everything except what roscore itself sets. Someone else's roscore: only
+    /use_sim_time and the namespaces that did not exist when this runner started (the ones its
+    own launches create); anything else belongs to other users and is left alone."""
+    for name in get_names():
+        if name in ROSCORE_PARAMS:
+            continue
+        if not owns_master and name != '/use_sim_time' and \
+                name.split('/')[1] in baseline_top:
+            continue
+        try:
+            delete(name)
+        except KeyError:
+            pass
+
+
 class RosIO:
     """Wall-time rospy node: latest /clock, /cmd_vel counter, goal publisher."""
 
-    def __init__(self):
+    def __init__(self, owns_master=True):
         import rospy
         from geometry_msgs.msg import PoseStamped, Twist
         from rosgraph_msgs.msg import Clock
@@ -373,6 +430,8 @@ class RosIO:
         except KeyError:
             pass
         rospy.init_node('exp_batch_runner', anonymous=True, disable_signals=True)
+        self.owns_master = owns_master
+        self.baseline_top = top_namespaces(rospy.get_param_names())   # before our first launch
         self._clock = None
         self._n_cmd = 0
         rospy.Subscriber('/clock', Clock, self._on_clock, queue_size=1)
@@ -387,13 +446,8 @@ class RosIO:
 
     def reset(self):
         """Before each launch: forget clock/cmd_vel, drop params left by the previous trial."""
-        for name in self.rospy.get_param_names():
-            if name in ('/rosdistro', '/rosversion'):     # set by roscore itself
-                continue
-            try:
-                self.rospy.delete_param(name)
-            except KeyError:
-                pass
+        reset_params(self.rospy.get_param_names, self.rospy.delete_param, self.baseline_top,
+                     self.owns_master)
         self._clock = None
         self._n_cmd = 0
 
@@ -411,10 +465,13 @@ class RosIO:
             self._connected = True
         m = self.PoseStamped()
         m.header.frame_id = 'odom'
-        m.header.stamp = self.rospy.Time.now()
+        m.header.stamp = self.rospy.Time(0)
         m.pose.position.x, m.pose.position.y = x, y
         m.pose.orientation.w = 1.0
         self.pub.publish(m)
+
+    def goal_subscribers(self):
+        return self.pub.get_num_connections()
 
     def new_trial(self):
         self._connected = False
@@ -469,6 +526,17 @@ def git_info():
     return info
 
 
+def _read(path):
+    with open(path) as f:
+        return f.read()
+
+
+def hashed_files(config_path):
+    """HASHED_FILES with the default scenarios.yaml replaced by the one actually used."""
+    default = EXP_DIR + '/config/scenarios.yaml'
+    return [os.path.abspath(config_path) if p == default else p for p in HASHED_FILES]
+
+
 class Manifest:
     def __init__(self, path, args):
         self.path = path
@@ -477,8 +545,9 @@ class Manifest:
             run_name=os.path.basename(os.path.normpath(os.path.dirname(path))),
             cli_args=vars(args), argv=sys.argv, start_wall=_now(), end_wall=None,
             status='running', git=git_info(),
-            sha256={os.path.relpath(p, WS): sha256(p) for p in HASHED_FILES},
-            scenarios_yaml=open(EXP_DIR + '/config/scenarios.yaml').read(),
+            sha256={(os.path.relpath(p, WS) if p.startswith(WS + '/') else p): sha256(p)
+                    for p in hashed_files(args.config)},
+            scenarios_yaml=_read(args.config),
             trials=prev.get('trials', {}), history=prev.get('history', []))
         if prev:
             self.data['history'].append({k: prev.get(k) for k in
@@ -501,9 +570,11 @@ class Manifest:
             actual_start_offset=m.get('actual_start_offset'), reason=r.get('reason'))
         self.save()
 
-    def finish(self, status):
+    def finish(self, status, error=None):
         self.data['end_wall'] = _now()
         self.data['status'] = status
+        if error is not None:
+            self.data['error'] = error
         self.save()
 
 
@@ -542,6 +613,40 @@ def parse_args(argv=None):
     return args
 
 
+def run_matrix(trials, trials_dir, launcher, io, retries=1, logs_dir=None, manifest=None,
+               say=print, precheck=None, **kw):
+    """Run all trials in order; return {outcome: count}. A trial whose run raises (other than
+    AbortBatch/KeyboardInterrupt) is recorded as a crash and the batch goes on. `io` provides
+    clock, publish_goal, goal_subscribers, ready, reset, new_trial (RosIO or a fake)."""
+    counts = {}
+    for i, t in enumerate(trials, 1):
+        t0 = time.time()
+        say('[%s] (%d/%d) %s ...' % (_now(), i, len(trials), t.trial_id))
+        io.new_trial()
+        try:
+            outcome = run_trial(
+                t, trials_dir, launcher, io.clock, io.publish_goal, retries=retries,
+                ready=io.ready, reset=io.reset, goal_subscribers=io.goal_subscribers,
+                precheck=precheck,
+                log_path=os.path.join(logs_dir, t.trial_id + '.launch.log') if logs_dir else None,
+                **kw)
+        except (AbortBatch, KeyboardInterrupt):
+            raise
+        except Exception as e:  # noqa: BLE001 - e.g. a failing stop(); keep the batch alive
+            sys.stderr.write('trial %s failed outside run_one:\n%s' % (t.trial_id,
+                                                                     traceback.format_exc()))
+            jp = _result_paths(trials_dir, t.trial_id)[0]
+            old = load_result(jp) or {}
+            _atomic_json(jp, crash_json(t, repr(e), trial_meta(t, 1 + int(old.get('attempts', 0))),
+                                        1 + int(old.get('attempts', 0))))
+            outcome = 'crash'
+        counts[outcome] = counts.get(outcome, 0) + 1
+        if manifest is not None:
+            manifest.record(t, trials_dir)
+        say('[%s]     -> %s (%.0f s wall)' % (_now(), outcome, time.time() - t0))
+    return counts
+
+
 def main(argv=None):
     args = parse_args(argv)
     cfg = load_scenarios(args.config)
@@ -557,39 +662,40 @@ def main(argv=None):
     os.makedirs(trials_dir, exist_ok=True)
     os.makedirs(logs_dir, exist_ok=True)
     manifest = Manifest(os.path.join(out, 'manifest.json'), args)
-    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
 
-    roscore, status = None, 'complete'
+    def on_signal(signum, _frame):
+        raise KeyboardInterrupt('signal %d' % signum)
+
+    old_handlers = {sg: signal.signal(sg, on_signal) for sg in INTERRUPT_SIGNALS}
+    roscore, status, error = None, 'complete', None
     try:
         roscore = ensure_roscore(os.path.join(logs_dir, 'roscore.log'))
-        io = RosIO()
-        launcher = make_launcher()
-        counts = {}
-        for i, t in enumerate(trials, 1):
-            t0 = time.time()
-            print('[%s] (%d/%d) %s ...' % (_now(), i, len(trials), t.trial_id), flush=True)
-            io.new_trial()
-            outcome = run_trial(
-                t, trials_dir, launcher, io.clock, io.publish_goal, retries=args.retries,
-                ready=io.ready, reset=io.reset,
-                log_path=os.path.join(logs_dir, t.trial_id + '.launch.log'))
-            counts[outcome] = counts.get(outcome, 0) + 1
-            manifest.record(t, trials_dir)
-            print('[%s]     -> %s (%.0f s wall)' % (_now(), outcome, time.time() - t0), flush=True)
+        io = RosIO(owns_master=roscore is not None)
+        counts = run_matrix(trials, trials_dir, make_launcher(), io, retries=args.retries,
+                            logs_dir=logs_dir, manifest=manifest,
+                            say=lambda m: print(m, flush=True),
+                            precheck=check_no_foreign_gzserver)
         print('done:', counts)
     except AbortBatch as e:
         status = 'aborted'
+        error = str(e)
         sys.stderr.write('ABORT: %s\n' % e)
     except KeyboardInterrupt:
         status = 'interrupted'
         sys.stderr.write('interrupted\n')
+    except Exception:  # noqa: BLE001
+        status = 'error'
+        error = traceback.format_exc()
+        sys.stderr.write(error)
     finally:
         if roscore is not None:
             try:
                 roscore.stop()
             except AbortBatch as e:
                 sys.stderr.write('%s\n' % e)
-        manifest.finish(status)
+        manifest.finish(status, error)
+        for sg, h in old_handlers.items():
+            signal.signal(sg, h)
     return 0 if status == 'complete' else 2
 
 
