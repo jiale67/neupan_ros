@@ -93,11 +93,24 @@ def _ms(vals):
     return float(np.mean(vals)), float(np.std(vals))
 
 
+def _finite(vals):
+    """Non-NaN entries of vals as a float array (crash rows carry NaN metrics)."""
+    v = np.asarray(list(vals), float)
+    return v[~np.isnan(v)]
+
+
+def _nanred(vals, fn):
+    """fn over the non-NaN entries; NaN only if there are none."""
+    v = _finite(vals)
+    return float(fn(v)) if v.size else NAN
+
+
 def aggregate(rows, budget_ms=100.0):
     """Aggregate per-trial metric dicts into a flat dict.
 
     SR (%) over all trials; T, L, e_g, J_du -> `<k>_mean`/`<k>_std` over successful trials
-    only (NaN if none); d_min_body/d_min_np -> `_min` and `_mean` over all trials;
+    only (NaN if none); d_min_body/d_min_np -> `_min`, `_mean`, `_std` over all trials
+    (NaN-aware: crash rows with NaN are skipped, NaN only if every row is NaN);
     collisions/estops -> `_total` and `_mean`; `outcomes` = outcome->count; n_trials,
     n_success. Timing (t_avg, t95, t_max, r_over): if rows carry `plan_ms_all`, the raw
     per-cycle samples are pooled across trials; otherwise the per-trial values are
@@ -110,8 +123,9 @@ def aggregate(rows, budget_ms=100.0):
         out[k + '_mean'], out[k + '_std'] = _ms([r[k] for r in succ])
     for k in ('d_min_body', 'd_min_np'):
         v = [r[k] for r in rows]
-        out[k + '_min'] = float(np.min(v)) if v else NAN
-        out[k + '_mean'] = float(np.mean(v)) if v else NAN
+        out[k + '_min'] = _nanred(v, np.min)
+        out[k + '_mean'] = _nanred(v, np.mean)
+        out[k + '_std'] = _nanred(v, np.std)
     for k in ('collisions', 'estops'):
         v = [r[k] for r in rows]
         out[k + '_total'] = int(np.sum(v)) if v else 0
@@ -128,8 +142,8 @@ def aggregate(rows, budget_ms=100.0):
         out.update(t_avg=float(p.mean()), t95=float(np.percentile(p, 95)),
                    t_max=float(p.max()), r_over=float(np.mean(p > budget_ms) * 100.0))
     else:
-        out.update(t_avg=_ms([r['t_avg'] for r in rows])[0],
-                   t95=_ms([r['t95'] for r in rows])[0],
-                   t_max=float(np.max([r['t_max'] for r in rows])) if rows else NAN,
-                   r_over=_ms([r['r_over'] for r in rows])[0])
+        out.update(t_avg=_nanred([r['t_avg'] for r in rows], np.mean),
+                   t95=_nanred([r['t95'] for r in rows], np.mean),
+                   t_max=_nanred([r['t_max'] for r in rows], np.max),
+                   r_over=_nanred([r['r_over'] for r in rows], np.mean))
     return out

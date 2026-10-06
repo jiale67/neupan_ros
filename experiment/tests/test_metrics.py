@@ -80,6 +80,26 @@ class TestMetrics(unittest.TestCase):
         self.assertEqual(a['t_max'], 200.0)
         self.assertAlmostEqual(a['r_over'], 25.0)
 
+    def test_aggregate_crash_row_nan_aware(self):
+        nan = float('nan')
+        ok = dict(outcome='success', success=True, T=10.0, L=3, e_g=0.1, J_du=1, d_min_np=0.3,
+                  d_min_body=0.2, collisions=0, estops=1, t_avg=5.0, t95=6.0, t_max=7.0,
+                  r_over=0.0, n_cycles=2, plan_ms_all=[5.0, 7.0])
+        crash = dict(outcome='crash', success=False, T=nan, L=nan, e_g=nan, J_du=nan,
+                     d_min_np=nan, d_min_body=nan, collisions=0, estops=0, t_avg=nan,
+                     t95=nan, t_max=nan, r_over=nan, n_cycles=0, plan_ms_all=[])
+        a = aggregate([ok, crash])
+        self.assertAlmostEqual(a['d_min_body_min'], 0.2)
+        self.assertAlmostEqual(a['d_min_body_mean'], 0.2)
+        self.assertAlmostEqual(a['d_min_body_std'], 0.0)
+        self.assertAlmostEqual(a['d_min_np_mean'], 0.3)
+        self.assertAlmostEqual(a['t_avg'], 6.0)
+        only = aggregate([crash])
+        self.assertTrue(np.isnan(only['d_min_body_min']))
+        self.assertTrue(np.isnan(only['d_min_body_mean']))
+        self.assertTrue(np.isnan(only['t_avg']))
+        self.assertEqual(only['outcomes'], {'crash': 1})
+
 
 if __name__ == '__main__':
     unittest.main()
