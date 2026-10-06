@@ -2,20 +2,30 @@
 """Records one navigation trial to disk (ch5 Gazebo experiment).
 
 Waits for the first /move_base_simple/goal (t0 = sim time then), records the robot pose
-stream (~20 Hz, gaps to ground-truth obstacles), every /cmd_vel and every /exp/planner_status,
-stops at 'arrived' | 'timeout' | 'stuck', writes <out_dir>/<trial_id>{.csv,_cmd.csv,_status.csv,.json}
-and publishes the outcome on /exp/trial_done. All CSV times are sim seconds relative to t0
-(sim time does not start at 0). NaN is written as 'nan'.
+stream (every /exp/model_states message, ~50 Hz, with gaps to ground-truth obstacles), every
+/cmd_vel and every /exp/planner_status, the dynamic obstacles' poses at ~10 Hz, stops at
+'arrived' | 'timeout' | 'stuck', writes
+<out_dir>/<trial_id>{.csv,_cmd.csv,_status.csv,_obs.csv,.json} and publishes the outcome on
+/exp/trial_done. All CSV times are sim seconds relative to t0 (sim time does not start at 0).
+NaN is written as 'nan'.
+
+Arrival: T = t_arrive = first sample with dist_goal <= arrive_threshold. The recording then
+goes on until the robot has settled (planar speed < settle_v_eps for settle_hold s, at most
+settle_max s after arrival); e_g is the goal distance at the end of that window (e_g_arrive at
+t_arrive). Collisions keep being evaluated while settling. JSON also has settle_s, rtf (sim
+seconds per wall second between t0 and the end) and wall_s (wall seconds t0 -> end).
 
 Private params: world_file, out_dir, trial_id, goal ("x y"), timeout, stuck_window (30),
 stuck_dist (0.1, progress-based), arrive_threshold (0.3), meta (JSON string, copied to the json),
-robot_name (V550_mec), record_period (0.05).
+robot_name (V550_mec), obs_period (0.1), settle_hold (1.0), settle_max (5.0),
+settle_v_eps (0.02).
 """
 import json
 import math
 import os
 import sys
 import threading
+import time
 
 import numpy as np
 import rospy
@@ -25,7 +35,8 @@ from std_msgs.msg import Float64MultiArray, String
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from neupan_exp.geometry import BODY_RECT, NP_RECT, footprint_polygon  # noqa: E402
-from neupan_exp.metrics import compute_trial_metrics, end_reason, window_progress  # noqa: E402
+from neupan_exp.metrics import (TrialSequencer, compute_trial_metrics, rtf_of,  # noqa: E402
+                                window_progress)
 from neupan_exp.truth import ObstacleTruth  # noqa: E402
 from neupan_exp.world import parse_world  # noqa: E402
 
@@ -49,7 +60,12 @@ class TrialRecorder:
         self.stuck_dist = float(rospy.get_param('~stuck_dist', 0.1))
         self.arrive_threshold = float(rospy.get_param('~arrive_threshold', 0.3))
         self.robot_name = rospy.get_param('~robot_name', 'V550_mec')
-        self.period = float(rospy.get_param('~record_period', 0.05))
+        self.obs_period = float(rospy.get_param('~obs_period', 0.1))
+        self.seq = TrialSequencer(
+            self.arrive_threshold, self.timeout, self.stuck_window, self.stuck_dist,
+            hold=float(rospy.get_param('~settle_hold', 1.0)),
+            max_wait=float(rospy.get_param('~settle_max', 5.0)),
+            v_eps=float(rospy.get_param('~settle_v_eps', 0.02)))
         meta = rospy.get_param('~meta', '{}')
         try:
             self.meta = json.loads(meta) if isinstance(meta, str) else meta
@@ -62,9 +78,15 @@ class TrialRecorder:
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.t0 = None
-        self.next_t = 0.0
+        self.wall0 = None
+        self.sim_end = None   # sim time (s since t0) and wall seconds of the last pose sample
+        self.wall_end = None
+        self.next_obs_t = 0.0
         self.reason = None
         self.pose = []    # rows: t x y yaw gap_np gap_body nearest dist_goal
+        self.pose_t = []  # t / dist_goal columns kept separately (stuck-window progress)
+        self.pose_d = []
+        self.obs = []     # rows: t name x y yaw (dynamic obstacles, ~obs_period)
         self.cmd = []     # t vx vy w
         self.status = []  # t plan_ms min_dist stop arrive
 
@@ -72,7 +94,7 @@ class TrialRecorder:
         rospy.Subscriber('/move_base_simple/goal', PoseStamped, self.on_goal, queue_size=1)
         rospy.Subscriber('/cmd_vel', Twist, self.on_cmd, queue_size=100)
         rospy.Subscriber('/exp/planner_status', Float64MultiArray, self.on_status, queue_size=100)
-        rospy.Subscriber('/exp/model_states', ModelStates, self.on_models, queue_size=5)
+        rospy.Subscriber('/exp/model_states', ModelStates, self.on_models, queue_size=20)
         rospy.loginfo('trial_recorder %s: goal=%s timeout=%.0f out_dir=%s',
                       self.trial_id, self.goal, self.timeout, self.out_dir)
 
@@ -83,7 +105,8 @@ class TrialRecorder:
         with self.lock:
             if self.t0 is None:
                 self.t0 = rospy.get_time()
-                self.next_t = 0.0
+                self.wall0 = time.time()
+                self.next_obs_t = 0.0
                 rospy.loginfo('trial %s started, t0=%.3f', self.trial_id, self.t0)
 
     def on_cmd(self, msg):
@@ -110,23 +133,28 @@ class TrialRecorder:
             if not self._active() or self.robot_name not in msg.name:
                 return
             t = t_abs - self.t0
-            if t < self.next_t - 1e-6:
-                return
-            self.next_t = max(self.next_t + self.period, t - 0.5 * self.period)
+            if t >= self.next_obs_t - 1e-6:       # dynamic obstacles, time-decimated
+                self.next_obs_t = max(self.next_obs_t + self.obs_period,
+                                      t - 0.5 * self.obs_period)
+                for n, q in zip(names, poses):
+                    self.obs.append((t, n) + q)
             p = msg.pose[msg.name.index(self.robot_name)]
             x, y, yaw = p.position.x, p.position.y, yaw_of(p.orientation)
             gap_np, near = self.truth.min_gap(footprint_polygon(x, y, yaw, *NP_RECT))
             gap_body, _ = self.truth.min_gap(footprint_polygon(x, y, yaw, *BODY_RECT))
             dist = math.hypot(x - self.goal[0], y - self.goal[1])
             self.pose.append((t, x, y, yaw, gap_np, gap_body, near, dist))
-            ts = [r[0] for r in self.pose]
-            ds = [r[7] for r in self.pose]
-            prog = window_progress(ts, ds, self.stuck_window)
-            r = end_reason(t_abs, self.t0, dist, prog, self.timeout, self.stuck_window,
-                           self.stuck_dist, self.arrive_threshold)
+            self.pose_t.append(t)
+            self.pose_d.append(dist)
+            prog = window_progress(self.pose_t, self.pose_d, self.stuck_window)
+            r = self.seq.update(t_abs, self.t0, t, x, y, dist, prog)
+            if self.seq.arrived and self.seq.t_arrive == t:
+                rospy.loginfo('trial %s: arrived at t=%.2f s (dist_goal %.3f), settling',
+                              self.trial_id, t, dist)
             if r:
                 self.reason = r
-                rospy.loginfo('trial %s ended: %s at t=%.1f s (dist_goal %.2f)',
+                self.sim_end, self.wall_end = t, time.time()
+                rospy.loginfo('trial %s ended: %s at t=%.1f s (dist_goal %.3f)',
                               self.trial_id, r, t, dist)
                 self.done.set()
 
@@ -142,6 +170,10 @@ class TrialRecorder:
             f.write('t,vx,vy,w\n')
             for r in self.cmd:
                 f.write('%s,%s,%s,%s\n' % (fmt(r[0], 4), fmt(r[1]), fmt(r[2]), fmt(r[3])))
+        with open(base + '_obs.csv', 'w') as f:
+            f.write('t,name,x,y,yaw\n')
+            for t, n, x, y, yaw in self.obs:
+                f.write('%s,%s,%s,%s,%s\n' % (fmt(t, 4), n, fmt(x), fmt(y), fmt(yaw)))
         with open(base + '_status.csv', 'w') as f:
             f.write('t,plan_ms,min_dist,stop,arrive\n')
             for r in self.status:
@@ -153,9 +185,13 @@ class TrialRecorder:
                'cmd_t': col(self.cmd, 0), 'cmd_vx': col(self.cmd, 1), 'cmd_vy': col(self.cmd, 2),
                'cmd_w': col(self.cmd, 3), 'st_t': col(self.status, 0),
                'plan_ms': col(self.status, 1), 'stop': [r[3] > 0.5 for r in self.status]}
-        m = compute_trial_metrics(log, self.goal, self.reason, self.arrive_threshold)
+        m = compute_trial_metrics(log, self.goal, self.reason, self.arrive_threshold,
+                                  t_arrive=self.seq.t_arrive)
+        wall_s = (self.wall_end - self.wall0) if self.wall0 is not None else float('nan')
         m.update(end_reason=self.reason, trial_id=self.trial_id, goal=list(self.goal),
-                 meta=self.meta)
+                 meta=self.meta, t_arrive=self.seq.t_arrive, settle_s=self.seq.settle_s,
+                 e_g_arrive=self.seq.e_g_arrive, wall_s=wall_s,
+                 rtf=rtf_of(self.sim_end, wall_s))
         with open(base + '.json', 'w') as f:
             json.dump(m, f, indent=1)
         return m['outcome']

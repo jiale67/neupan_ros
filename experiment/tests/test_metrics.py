@@ -91,7 +91,7 @@ class TestMetrics(unittest.TestCase):
         a = aggregate([ok, crash])
         self.assertAlmostEqual(a['d_min_body_min'], 0.2)
         self.assertAlmostEqual(a['d_min_body_mean'], 0.2)
-        self.assertAlmostEqual(a['d_min_body_std'], 0.0)
+        self.assertTrue(np.isnan(a['d_min_body_std']))   # sample std of one value is undefined
         self.assertAlmostEqual(a['d_min_np_mean'], 0.3)
         self.assertAlmostEqual(a['t_avg'], 6.0)
         only = aggregate([crash])
