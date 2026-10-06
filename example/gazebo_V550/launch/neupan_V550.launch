@@ -153,7 +153,14 @@
     <arg name="world_file"               default=''/>
     <arg name="rviz"                     default='true'/>
 
-    <node name='neupan_control' pkg="neupan_ros" type="neupan_node.py" output="screen">
+    <!--
+      node_required  true 时 neupan 节点退出（例如求解器异常崩溃）会结束整个 launch。
+                     默认 false（原行为）；exp_trial.launch 给 true，崩溃 -> runner 记 crash。
+    -->
+    <arg name="node_required"            default='false'/>
+
+    <node name='neupan_control' pkg="neupan_ros" type="neupan_node.py" output="screen"
+          required="$(arg node_required)">
         <param name="config_file"      value="$(arg config_file)"/>
         <param name="dune_checkpoint"  value="$(arg dune_checkpoint)"/>
         <param name="map_frame"        value="$(arg map_frame)"/>

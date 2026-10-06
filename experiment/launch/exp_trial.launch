@@ -49,6 +49,8 @@
       <arg name="wait_for_start"           value="true"/>
       <arg name="start_trigger_mode"       value="goal"/>
       <arg name="goal"                     value="$(arg goal)"/>
+      <!-- planner crash ends the launch -> runner labels the trial 'crash' (DWA is required too) -->
+      <arg name="node_required"            value="true"/>
     </include>
   </group>
 

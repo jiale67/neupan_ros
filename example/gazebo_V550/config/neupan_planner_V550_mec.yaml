@@ -58,6 +58,17 @@ robot:
   max_speed: [1.0, 1.0, 1.0]
   max_acce: [1.0, 1.0, 2.0]
 
+  # 首步限速 (fix F1)。上面的 max_acce 只约束 horizon 内相邻两步 (间隔 step_time
+  # 0.3 s)，第一步 u_0 与上一拍**实际下发**的指令无关；节点 10 Hz 只执行 u_0，
+  # 于是执行出来的加速度可远超 max_acce (smoke S2 实测 |dw| 1.5 rad/s / 0.1 s)。
+  # 打开后 MPC 多一个参数 u_prev (上一拍执行的世界系 vx, vy, w) 和约束
+  #   ||u_0[0:2] - u_prev[0:2]|| <= max_acce[0] * ctrl_period = 0.1 m/s
+  #   |u_0[2]   - u_prev[2]|     <= max_acce[2] * ctrl_period = 0.2 rad/s
+  # ctrl_period = 实际下发指令的周期 (exp_trial 里 control_rate 10 Hz)。
+  # 不写这两项时默认关闭，行为与原来一致。
+  first_step_rate_limit: true
+  ctrl_period: 0.1
+
   # 横移代价相对前进代价的比例 (omni / omni3)。实际权重 = lateral_ratio * adjust.p_u。
   # 下面这组实测数据是在 2 自由度 omni 下测的，omni3 沿用 0.2：机制没变
   # (横移仍是绕障的主要手段，w 控的是车头朝向而不是位移方向)，但 omni3 下多了

@@ -325,6 +325,12 @@ class neupan_core:
         # generate_twist_msg 会读它。待命期间要发零速度就得先有这个属性，
         # 否则 AttributeError。
         self.arrive = False
+        # 上一拍**实际下发**的控制量，规划器控制坐标系 (omni3: 世界系 vx, vy, w)。
+        # 每拍作为 u_prev 传给规划器 (yaml robot.first_step_rate_limit 打开时生效:
+        # 首步相对它限速；关闭时规划器忽略)。发零 Twist (待命/stop/arrive) 时记零。
+        # 下发的 Twist 是车体系 (generate_twist_msg 按当时 yaw 旋转)，这里存的是
+        # 产生它的世界系 action，不从 Twist 反算。
+        self.last_cmd = np.zeros((self.neupan_planner.robot.control_dim, 1))
         # 是否已经放行。wait_for_start=false 时等于一开始就放行，行为与改动前一致。
         self.started = not self.wait_for_start
 
@@ -615,6 +621,7 @@ class neupan_core:
                 # 明确发零速度而不是什么都不发。gazebo 的驱动插件会保持上一条
                 # cmd_vel，如果别的节点先发过速度，这里不发就停不住。
                 self.vel_pub.publish(Twist())
+                self.last_cmd = np.zeros_like(self.last_cmd)
                 # omni 朝向环的状态一起清掉。/neupan_start false 中途暂停时，
                 # 留着 last_rate 会让恢复的第一帧从一个已经不存在的角速度起算，
                 # last_t 留着则会算出巨大的 dt 使滤波和限幅同时失效。
@@ -658,7 +665,9 @@ class neupan_core:
                     # 没有任何包围盒点，按"没有障碍物"处理，与 obstacle_points=None 同路径。
                     points, velocities = None, None
 
-            action, info = self.neupan_planner(self.robot_state, points, velocities)
+            action, info = self.neupan_planner(
+                self.robot_state, points, velocities, u_prev=self.last_cmd
+            )
 
             plan_ms = (time.perf_counter() - t_plan) * 1e3
 
@@ -692,6 +701,7 @@ class neupan_core:
             self.plan_pub.publish(self.generate_path_msg(info["opt_state_list"]))
             self.ref_state_pub.publish(self.generate_path_msg(info["ref_state_list"]))
             self.vel_pub.publish(self.generate_twist_msg(action))
+            self.last_cmd = self.executed_planner_action(action)
 
             self.point_markers_pub_dune.publish(self.generate_dune_points_markers_msg())
             self.point_markers_pub_nrmp.publish(self.generate_nrmp_points_markers_msg())
@@ -1100,6 +1110,20 @@ class neupan_core:
             action.angular.z = vel[1, 0]
 
         return action
+
+    def executed_planner_action(self, vel):
+
+        """
+        generate_twist_msg(vel) 实际下发的控制量，换回规划器控制坐标系
+        (omni3: 世界系 vx, vy, w；omni: 世界系 vx, vy)。分支与 generate_twist_msg
+        一致: vel 为 None 或 stop/arrive 时下发的是零 Twist，记零。
+        omni 外挂朝向环给的角速度不是规划器控制量，不记。
+        """
+
+        if vel is None or self.stop or self.arrive:
+            return np.zeros_like(self.last_cmd)
+
+        return np.asarray(vel, dtype=float).reshape(self.last_cmd.shape).copy()
 
     def omni_yaw_rate(self, vx_w, vy_w, theta):
 
