@@ -21,8 +21,15 @@ def _box_samples(lo, hi, spacing):
 def aabb_points(points, velocities, labels, eps=0.15, min_samples=2, spacing=0.1):
     pts = np.asarray(points, dtype=float).reshape(2, -1)
     n = pts.shape[1]
-    vel = np.zeros((2, n)) if velocities is None else np.asarray(velocities, dtype=float).reshape(2, n)
+    if velocities is None:
+        vel = np.zeros((2, n))
+    else:
+        vel = np.asarray(velocities, dtype=float)
+        if vel.shape != (2, n):
+            raise ValueError('velocities must have shape (2, %d), got %s' % (n, vel.shape))
     lab = -np.ones(n, dtype=int) if labels is None else np.asarray(labels, dtype=int)
+    if lab.shape != (n,):
+        raise ValueError('labels must have %d entries, got shape %s' % (n, lab.shape))
     if n == 0:
         return np.zeros((2, 0)), np.zeros((2, 0))
 

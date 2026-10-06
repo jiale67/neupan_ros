@@ -24,6 +24,14 @@ class TestAabb(unittest.TestCase):
         a = aabb_points(P, None, None, eps=0.3)
         b = aabb_points(P, None, None, eps=0.3)
         self.assertTrue(np.array_equal(a[0], b[0]))
+        self.assertTrue(np.array_equal(a[1], b[1]))
+
+    def test_bad_lengths(self):
+        P = np.zeros((2, 3))
+        with self.assertRaises(ValueError):
+            aabb_points(P, None, np.array([0, 1]))
+        with self.assertRaises(ValueError):
+            aabb_points(P, np.zeros((2, 2)), None)
 
     def test_dynamic_not_merged_with_static(self):
         wall = np.vstack([np.zeros(11), np.linspace(0, 1, 11)])

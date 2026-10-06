@@ -1,6 +1,8 @@
+import os
 import unittest
 import numpy as np
 from neupan_exp.world import ObstacleSpec
+from neupan_exp.world import parse_world
 from neupan_exp.truth import ObstacleTruth
 from neupan_exp.geometry import footprint_polygon, BODY_RECT
 
@@ -18,13 +20,29 @@ class TestTruth(unittest.TestCase):
         v = tr.point_velocities(pts)
         self.assertTrue(np.allclose(v[:, 0], (0.19, 0)) and np.allclose(v[:, 1], 0))
 
-    def test_multi_collision_prefix(self):
-        specs = [ObstacleSpec('m/0', 'box', (0.2, 0.2), 0, 0, 0, True),
-                 ObstacleSpec('m/1', 'box', (0.2, 0.2), 1, 0, 0, True)]
+    def test_multi_collision_dynamic_rejected(self):
+        specs = [ObstacleSpec('m/0', 'box', (0.2, 0.2), 0, 0, 0, True, ((0, 0), (1, 0))),
+                 ObstacleSpec('m/1', 'box', (0.2, 0.2), 1, 0, 0, True, ((0, 0), (1, 0)))]
+        with self.assertRaisesRegex(ValueError, 'm'):
+            ObstacleTruth(specs)
+
+    def test_offset_dynamic_rejected(self):
+        s = ObstacleSpec('o', 'box', (0.2, 0.2), 0.5, 0, 0, True, ((0, 0), (1, 0)))
+        with self.assertRaisesRegex(ValueError, 'o'):
+            ObstacleTruth([s])
+
+    def test_static_multi_collision_ok(self):
+        specs = [ObstacleSpec('w/0', 'box', (0.2, 0.2), 0, 0, 0, False),
+                 ObstacleSpec('w/1', 'box', (0.2, 0.2), 1, 0, 0, False)]
         tr = ObstacleTruth(specs)
-        tr.update(['m'], [(2, 0, 0)], 0.0)
-        tr.update(['m'], [(2.05, 0, 0)], 0.1)
-        self.assertTrue(np.allclose(tr.velocity('m/1'), (0.5, 0)))
+        tr.update(['w'], [(9, 9, 0)], 0.0)
+        self.assertEqual(tr.point_labels(np.array([[1.0], [0.0]])).tolist(), [-1])
+
+    def test_real_dynamic_world(self):
+        w = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..',
+                         'example', 'gazebo_V550', 'world', 'dynamic_scene.world')
+        tr = ObstacleTruth(parse_world(w))
+        self.assertTrue(any(s.dynamic for s in tr.specs))
 
     def test_collision_gap(self):
         st = ObstacleSpec('w', 'box', (0.5, 0.2), 0, 0, 0, False)

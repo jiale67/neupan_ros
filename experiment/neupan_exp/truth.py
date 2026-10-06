@@ -17,6 +17,13 @@ class ObstacleTruth:
         self._by_model = {}
         for s in self.specs:
             self._by_model.setdefault(s.name.split('/')[0], []).append(s.name)
+        for model, names in self._by_model.items():
+            dyn = [self.specs[self._index[n]] for n in names if self.specs[self._index[n]].dynamic]
+            if len(dyn) > 1:
+                raise ValueError('dynamic model %r has several collision specs; unsupported' % model)
+            for s in dyn:
+                if s.path and (abs(s.x - s.path[0][0]) > 1e-6 or abs(s.y - s.path[0][1]) > 1e-6):
+                    raise ValueError('dynamic model %r has a collision offset from the model origin; unsupported' % model)
 
     def update(self, names, poses, t):
         for model, pose in zip(names, poses):
