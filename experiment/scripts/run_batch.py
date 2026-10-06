@@ -227,6 +227,7 @@ def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None,
                                    'wall_goal_time', 'attempt', 'goal_subscribers')
                                   if k in meta})
                 r['attempts'] = attempt
+                r['runner_patched'] = True   # completeness marker (the recorder never writes it)
                 r['wall_s'] = time.time() - t_wall0
                 _atomic_json(json_path, r)
                 if exit_grace > 0:       # the launch ends by itself once the recorder is done
@@ -250,17 +251,16 @@ def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None,
 
 
 def run_trial(trial, out_dir, launcher, clock_source, goal_pub, retries=1, **kw):
-    """Skip trials that already have a complete non-crash json (meta.attempt set by the runner); retry crashes up to 1+retries attempts."""
+    """Skip trials that already have a complete non-crash json (`runner_patched`); retry crashes up to 1+retries attempts."""
     json_path = _result_paths(out_dir, trial.trial_id)[0]
     existing = load_result(json_path)
     attempts = 0
     outcome = None
     if existing is not None:
         outcome = existing.get('outcome')
-        meta = existing.get('meta')
         if outcome == 'crash':
             attempts = int(existing.get('attempts', 1))
-        elif isinstance(meta, dict) and 'attempt' in meta:
+        elif existing.get('runner_patched') is True:
             return outcome          # complete: recorder json patched by this runner
         # else: recorder json the runner never finished (killed before patching) -> run again
     while attempts < 1 + retries:

@@ -92,7 +92,7 @@ class TestRunner(unittest.TestCase):
         trial = make_trial()
         with open(os.path.join(self.out, trial.trial_id + '.json'), 'w') as f:
             json.dump({'outcome': 'timeout', 'trial_id': trial.trial_id,
-                       'meta': {'attempt': 1}}, f)
+                       'meta': rb.trial_meta(trial, 1), 'runner_patched': True}, f)
         calls = []
         outcome = rb.run_trial(trial, self.out, lambda *a: calls.append(a), FakeClock(),
                                lambda x, y: None, retries=1)
@@ -293,21 +293,42 @@ class TestFixRound1(unittest.TestCase):
         default = os.path.join(rb.EXP_DIR, 'config', 'scenarios.yaml')
         self.assertNotIn(rb.sha256(default), m.data['sha256'].values())
 
-    # 3. unpatched non-crash json is incomplete
-    def test_resume_reruns_json_without_runner_meta(self):
+    # 3. unpatched non-crash json is incomplete; patched one is skipped
+    def test_resume_reruns_unpatched_json_and_skips_patched(self):
         trial = make_trial()
-        with open(os.path.join(self.out, trial.trial_id + '.json'), 'w') as f:
-            json.dump({'outcome': 'success', 'trial_id': trial.trial_id, 'meta': {}}, f)
+        path = os.path.join(self.out, trial.trial_id + '.json')
+        # exactly what the recorder writes: meta is the launch's meta arg, which already
+        # contains `attempt`; no runner_patched
+        with open(path, 'w') as f:
+            json.dump({'outcome': 'success', 'trial_id': trial.trial_id,
+                       'meta': rb.trial_meta(trial, 1)}, f)
         calls = []
 
         def launcher(t, out_dir, meta_json, log_path):
             calls.append(1)
             return FakeHandle()
 
-        o = rb.run_trial(trial, self.out, launcher, FakeClock(), lambda x, y: None, retries=0,
-                         wall_timeout=0.1, ready=lambda: True, poll=0.01, exit_grace=0)
+        kw = dict(retries=0, wall_timeout=0.1, ready=lambda: True, poll=0.01, exit_grace=0)
+        o = rb.run_trial(trial, self.out, launcher, FakeClock(), lambda x, y: None, **kw)
         self.assertEqual(len(calls), 1)
         self.assertEqual(o, 'crash')   # fake never produces a json; the point is that it re-ran
+        # a json patched by run_one is complete and skipped on resume
+        state = {}
+
+        def launcher2(t, out_dir, meta_json, log_path):
+            calls.append(2)
+            state['meta_json'], state['dir'] = meta_json, out_dir
+            return FakeHandle()
+
+        o = rb.run_trial(trial, self.out, launcher2, FakeClock(),
+                         lambda x, y: write_result(state['dir'], trial, state['meta_json']),
+                         retries=1, wall_timeout=3, ready=lambda: True, poll=0.001,
+                         exit_grace=0, goal_gap=0.0)    # budget left after the crash above
+        self.assertEqual(o, 'success')
+        self.assertTrue(self._json(trial)['runner_patched'])
+        n = len(calls)
+        o = rb.run_trial(trial, self.out, launcher2, FakeClock(), lambda x, y: None, **kw)
+        self.assertEqual((o, len(calls)), ('success', n))
 
     # 4. param reset on a foreign master
     def test_reset_params_foreign_master_keeps_others(self):
