@@ -1,0 +1,73 @@
+<launch>
+  <!--
+    One complete trial of the ch5 Gazebo experiment: headless Gazebo + one planner +
+    /exp/model_states throttle + trial recorder. The recorder is required, so the whole launch
+    exits once it has written its files (the trial ended).
+
+      roslaunch neupan_ros exp_trial.launch method:=neupan world:=static_scene \
+          x:=-9 y:=-7 yaw:=0.714 goal:="6 6.5" timeout:=150 out_dir:=/path trial_id:=smoke
+      # once /cmd_vel is publishing (planner ready), start the trial:
+      rostopic pub -1 /move_base_simple/goal geometry_msgs/PoseStamped \
+          '{header: {frame_id: odom}, pose: {position: {x: 6, y: 6.5}, orientation: {w: 1}}}'
+
+    method: neupan (points) | aabb (NeuPAN on per-obstacle AABB sample points) | dwa
+    meta:   JSON string copied verbatim into <trial_id>.json
+  -->
+  <arg name="method"   default="neupan"/>
+  <arg name="world"    default="static_scene"/>
+  <arg name="x"        default="-9.0"/>
+  <arg name="y"        default="-7.0"/>
+  <arg name="yaw"      default="0.0"/>
+  <arg name="goal"     default="6 6.5"/>
+  <arg name="timeout"  default="150"/>
+  <arg name="out_dir"  default="$(env HOME)/nav_ws/exp_data/trial"/>
+  <arg name="trial_id" default="trial"/>
+  <arg name="meta"     default="{}"/>
+  <arg name="stuck_window" default="30.0"/>
+  <arg name="stuck_dist"   default="0.1"/>
+
+  <arg name="world_file" default="$(find neupan_ros)/example/gazebo_V550/world/$(arg world).world"/>
+
+  <include file="$(find neupan_ros)/example/gazebo_V550/launch/gazebo_V550.launch">
+    <arg name="world" value="$(arg world)"/>
+    <arg name="gui"   value="false"/>
+    <arg name="x"     value="$(arg x)"/>
+    <arg name="y"     value="$(arg y)"/>
+    <arg name="yaw"   value="$(arg yaw)"/>
+  </include>
+
+  <node name="exp_model_states_throttle" pkg="topic_tools" type="throttle"
+        args="messages /gazebo/model_states 50 /exp/model_states"/>
+
+  <group if="$(eval arg('method') in ('neupan', 'aabb'))">
+    <include file="$(find neupan_ros)/example/gazebo_V550/launch/neupan_V550.launch">
+      <arg name="control_rate"             value="10"/>
+      <arg name="obstacle_velocity_source" value="truth"/>
+      <arg name="obstacle_repr"            value="$(eval 'aabb' if arg('method') == 'aabb' else 'points')"/>
+      <arg name="world_file"               value="$(arg world_file)"/>
+      <arg name="rviz"                     value="false"/>
+      <arg name="wait_for_start"           value="true"/>
+      <arg name="start_trigger_mode"       value="goal"/>
+      <arg name="goal"                     value="$(arg goal)"/>
+    </include>
+  </group>
+
+  <group if="$(eval arg('method') == 'dwa')">
+    <include file="$(find local_planner)/launch/omni_dwa_V550.launch">
+      <arg name="rviz" value="false"/>
+    </include>
+  </group>
+
+  <node name="trial_recorder" pkg="neupan_ros" type="trial_recorder.py" output="screen"
+        required="true">
+    <param name="world_file"   type="str"    value="$(arg world_file)"/>
+    <param name="out_dir"      type="str"    value="$(arg out_dir)"/>
+    <param name="trial_id"     type="str"    value="$(arg trial_id)"/>
+    <param name="goal"         type="str"    value="$(arg goal)"/>
+    <param name="timeout"      type="double" value="$(arg timeout)"/>
+    <param name="stuck_window" type="double" value="$(arg stuck_window)"/>
+    <param name="stuck_dist"   type="double" value="$(arg stuck_dist)"/>
+    <param name="arrive_threshold" type="double" value="0.3"/>
+    <param name="meta"         type="str"    value="$(arg meta)"/>
+  </node>
+</launch>

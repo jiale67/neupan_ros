@@ -1,4 +1,5 @@
 """Per-trial metrics and cross-trial aggregation."""
+import bisect
 import math
 
 import numpy as np
@@ -11,6 +12,37 @@ def _rising(flags):
     if f.size == 0:
         return 0
     return int(np.sum(f & ~np.concatenate([[False], f[:-1]])))
+
+
+def window_progress(ts, dists, window):
+    """Progress toward the goal over the trailing `window` seconds of a trial.
+
+    ts ascending (seconds), dists = distance to goal at each ts. Returns None until the
+    history covers `window`; otherwise (dist at the start of the window, i.e. the last
+    sample at or before ts[-1] - window) minus (min dist from there to the end), >= 0.
+    Progress-based (not displacement-based) so lateral jitter does not hide a stall.
+    """
+    if len(ts) < 2 or ts[-1] - ts[0] < window:
+        return None
+    i0 = max(bisect.bisect_right(ts, ts[-1] - window + 1e-9) - 1, 0)
+    return max(0.0, float(dists[i0]) - float(min(dists[i0:])))
+
+
+def end_reason(t, t0, dist_goal, progress_window, timeout, stuck_window, stuck_dist,
+               arrive_threshold):
+    """Trial end condition: 'arrived' | 'timeout' | 'stuck' | None (precedence in that order).
+
+    progress_window: see window_progress (None counts as not yet measurable). 'stuck' needs
+    the trial to have run >= stuck_window and progress_window < stuck_dist.
+    """
+    if dist_goal <= arrive_threshold:
+        return 'arrived'
+    if t - t0 > timeout:
+        return 'timeout'
+    if (t - t0 >= stuck_window and progress_window is not None
+            and progress_window < stuck_dist):
+        return 'stuck'
+    return None
 
 
 def compute_trial_metrics(log, goal, end_reason, arrive_threshold=0.3, budget_ms=100.0):
