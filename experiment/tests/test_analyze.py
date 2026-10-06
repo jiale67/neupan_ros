@@ -58,7 +58,7 @@ class AnalyzeTest(unittest.TestCase):
         self.assertIn('\\label{tab:仿真实时性}', tex)
         self.assertIn('66.7', tex)
         # T: successes only (20, 30) -> 25.00, never the timeout's 99
-        self.assertIn('$25.00\\pm 5.00$', tex)
+        self.assertIn('$25.00\\pm 7.07$', tex)   # sample std of 20, 30
         self.assertNotIn('99', tex)
         # row order 本文方法, AABB-MPC, DWA
         self.assertLess(tex.index('本文方法'), tex.index('AABB-MPC'))

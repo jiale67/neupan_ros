@@ -4,8 +4,12 @@
     python3 scripts/analyze.py --results <run_dir> [--out <run_dir>/report]
 
 Reads <run>/trials/<trial_id>.json (+ .csv / _cmd.csv for figures); never writes outside --out.
-Outputs: all_trials.csv, summary_<scene>.csv, timing.csv, tables.tex, traj_<scene>_p<k>.pdf,
-ts_<scene>_p<k>.pdf, plan_time_box.pdf.
+Outputs: all_trials.csv, summary_<scene>.csv, summary_matched_<scene>.csv, timing.csv,
+accel.csv, sanity.txt, tables.tex, traj_<scene>_p<k>.pdf, ts_<scene>_p<k>.pdf, plan_time_box.pdf.
+
+Command-derived metrics (read from <trial>_cmd.csv, commands up to t_arrive, failures: all):
+uniform e-stops (rising edges of an all-zero command after the first non-zero one), J_v, J_w,
+executed accelerations. Data from before fix F2 (no t_arrive / settle_s / rtf) still loads.
 """
 import argparse
 import csv
@@ -21,7 +25,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
 
 from neupan_exp.geometry import rect_polygon  # noqa: E402
-from neupan_exp.metrics import aggregate  # noqa: E402
+from neupan_exp.metrics import (accel_samples, aggregate, cmd_jerk_split, sample_std,  # noqa: E402
+                                status_gap_max, uniform_estops)
 from neupan_exp.world import parse_world  # noqa: E402
 
 DEFAULT_WORLD_DIR = os.path.join(HERE, '..', '..', 'example', 'gazebo_V550', 'world')
@@ -34,11 +39,80 @@ FONT_CANDIDATES = ('SimHei', 'Noto Sans CJK SC', 'Noto Sans CJK JP', 'Noto Sans 
                    'WenQuanYi Zen Hei')
 NAN = float('nan')
 
-ROW_KEYS = ('T', 'L', 'e_g', 'd_min_np', 'd_min_body', 'collisions', 'estops', 'J_du', 't_avg',
+ROW_KEYS = ('T', 'L', 'e_g', 'd_min_np', 'd_min_body', 'collisions', 'J_du', 't_avg',
             't95', 't_max', 'r_over', 'n_cycles')
 
 
 # ----------------------------------------------------------------------------- loading
+def _num(v):
+    """float(v) if v is a finite real number (not bool/str), else None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v) if math.isfinite(v) else None
+
+
+def arrival_time(d):
+    """Time of arrival (s from the goal message) = end of the 'path to the goal' window used
+    for all command metrics; None when the trial did not arrive. Old json: T of arrived trials."""
+    ta = _num(d.get('t_arrive'))
+    if ta is not None:
+        return ta
+    if 't_arrive' not in d and d.get('end_reason') == 'arrived':
+        return _num(d.get('T'))
+    return None
+
+
+def command_metrics(base, t_arrive, planner_estops):
+    """Metrics derived from <base>_cmd.csv (commands up to t_arrive, or all if it is None)."""
+    c = read_csv_cols(base + '_cmd.csv')
+    out = dict(estops=planner_estops, estops_src='planner', J_v=NAN, J_w=NAN,
+               a_lin=[], a_ang=[], n_zero_trans=0)
+    if c is None or not len(c.get('t', [])):
+        return out
+    t_end = t_arrive
+    out['estops'] = uniform_estops(c['t'], c['vx'], c['vy'], c['w'], t_end)
+    out['estops_src'] = 'cmd'
+    out['J_v'], out['J_w'] = cmd_jerk_split(c['t'], c['vx'], c['vy'], c['w'], t_end)
+    a = accel_samples(c['t'], c['vx'], c['vy'], c['w'], t_end)
+    out.update(a_lin=list(a['a_lin']), a_ang=list(a['a_ang']), n_zero_trans=a['n_zero_trans'])
+    return out
+
+
+def sanity_flags(d):
+    """Flags of one trial from a dict with (all optional) status_gap_max, n_cycles,
+    goal_subscribers, late_start, attempts, rtf. Missing / non-numeric fields never flag."""
+    f = []
+    g = _num(d.get('status_gap_max'))
+    if g is not None and g > 0.5:
+        f.append('status_gap')
+    n = _num(d.get('n_cycles'))
+    if n is not None and n == 0:
+        f.append('no_cycles')
+    gs = _num(d.get('goal_subscribers'))
+    if gs is not None and gs < 2:
+        f.append('goal_subs<2')
+    if d.get('late_start') is True:
+        f.append('late_start')
+    at = _num(d.get('attempts'))
+    if at is not None and at > 1:
+        f.append('retried')
+    r = _num(d.get('rtf'))
+    if r is not None and r < 0.9:
+        f.append('rtf<0.9')
+    return f
+
+
+def _status_gap(base, t_arrive):
+    st = read_csv_cols(base + '_status.csv')
+    if st is None or not len(st.get('t', [])):
+        return 0.0
+    t_end = t_arrive
+    if t_end is None:
+        pose = read_csv_cols(base + '.csv')
+        t_end = float(pose['t'][-1]) if pose is not None and len(pose['t']) else float(st['t'][-1])
+    return status_gap_max(st['t'], t_end)
+
+
 def load_trials(results):
     """One flat row per trial json (crash rows included). `plan_ms_all` is kept."""
     rows = []
@@ -50,6 +124,10 @@ def load_trials(results):
         parts = tid.split('_')
         r = {k: d.get(k, NAN) for k in ROW_KEYS}
         r['n_cycles'] = d.get('n_cycles', len(d.get('plan_ms_all') or []))
+        base = os.path.join(results, 'trials', tid)
+        ta = arrival_time(d)
+        r['estops_planner'] = d.get('estops', NAN)
+        r.update(command_metrics(base, ta, r['estops_planner']))
         r.update(trial_id=tid, outcome=d.get('outcome', 'crash'),
                  success=bool(d.get('success', False)), end_reason=d.get('end_reason', ''),
                  scene=meta.get('scene', parts[0]), method=meta.get('method', parts[1]),
@@ -60,7 +138,18 @@ def load_trials(results):
                  plan_ms_all=list(d.get('plan_ms_all') or []),
                  late_start=meta.get('late_start', ''), attempts=d.get('attempts', ''),
                  runner_patched=d.get('runner_patched', ''),
-                 json_path=p, base=os.path.join(results, 'trials', tid))
+                 t_arrive=ta if ta is not None else NAN,
+                 settle_s=_num(d.get('settle_s')) if _num(d.get('settle_s')) is not None else NAN,
+                 e_g_arrive=_num(d.get('e_g_arrive')) if _num(d.get('e_g_arrive')) is not None
+                 else NAN,
+                 settled=_num(d.get('settle_s')) is not None,
+                 rtf=_num(d.get('rtf')) if _num(d.get('rtf')) is not None else NAN,
+                 wall_s=_num(d.get('wall_s')) if _num(d.get('wall_s')) is not None else NAN,
+                 goal_subscribers=meta.get('goal_subscribers', ''),
+                 code_check=meta.get('code_check', ''),
+                 status_gap_max=_status_gap(base, ta),
+                 json_path=p, base=base)
+        r['flags'] = ';'.join(sanity_flags(r))
         rows.append(r)
     rows.sort(key=lambda r: (r['scene'], r['pair'], r['method'], r['seed']))
     return rows
@@ -76,6 +165,7 @@ def f2(v):
 
 
 def pm(mean, std):
+    """mean +- SAMPLE std; '--' when either is undefined (n < 2 has no sample std)."""
     return '$%.2f\\pm %.2f$' % (mean, std) if _finite(mean) and _finite(std) else '--'
 
 
@@ -117,14 +207,73 @@ def group(rows):
     return g, scenes
 
 
+def _mean_finite(vals):
+    v = [x for x in vals if _finite(x)]
+    return float(np.mean(v)) if v else NAN
+
+
 def summarize(rows):
-    """{(scene, method): aggregate dict + method/scene/pooled cycle count}."""
+    """{(scene, method): aggregate dict + pooled cycle count + mean RTF}."""
     g, _ = group(rows)
     out = {}
     for key, rs in g.items():
         a = aggregate(rs)
         a['n_cycles'] = int(sum(len(r['plan_ms_all']) for r in rs))
+        a['rtf_mean'] = _mean_finite([r.get('rtf', NAN) for r in rs])
         out[key] = a
+    return out
+
+
+MATCH_KEYS = ('T', 'L', 'J_v', 'J_w')
+
+
+def matched_sets(rows):
+    """{scene: {(pair, seed)}} where every method present in the scene succeeded."""
+    by = {}
+    for r in rows:
+        d = by.setdefault(r['scene'], {}).setdefault((r['pair'], r['seed']), {})
+        d[r['method']] = d.get(r['method'], True) and bool(r['success'])
+    out = {}
+    for scene, cells in by.items():
+        methods = {r['method'] for r in rows if r['scene'] == scene}
+        out[scene] = {k for k, v in cells.items()
+                      if set(v) == methods and all(v.values())}
+    return out
+
+
+def matched_summary(rows, matched):
+    """{(scene, method): n_matched, <k>_mean/_std (sample std) of T, L, J_v, J_w over the
+    pair-matched set of the scene}."""
+    out = {}
+    for r in rows:
+        out.setdefault((r['scene'], r['method']), [])
+        if (r['pair'], r['seed']) in matched.get(r['scene'], set()):
+            out[(r['scene'], r['method'])].append(r)
+    res = {}
+    for key, rs in out.items():
+        a = {'n_matched': len(rs)}
+        for k in MATCH_KEYS:
+            v = [x for x in (r.get(k, NAN) for r in rs) if _finite(x)]
+            a[k + '_mean'] = float(np.mean(v)) if v else NAN
+            a[k + '_std'] = sample_std(v)
+        res[key] = a
+    return res
+
+
+def accel_summary(rows):
+    """{(scene, method): peak/p95 of the pooled executed accelerations + counts}."""
+    g, _ = group(rows)
+    out = {}
+    for key, rs in g.items():
+        lin = np.array([v for r in rs for v in r.get('a_lin', [])], float)
+        ang = np.array([v for r in rs for v in r.get('a_ang', [])], float)
+        out[key] = dict(
+            peak_lin=float(lin.max()) if lin.size else NAN,
+            p95_lin=float(np.percentile(lin, 95)) if lin.size else NAN,
+            peak_ang=float(ang.max()) if ang.size else NAN,
+            p95_ang=float(np.percentile(ang, 95)) if ang.size else NAN,
+            n_zero_trans=int(sum(r.get('n_zero_trans', 0) for r in rs)),
+            n_pairs=int(lin.size), n_trials=len(rs))
     return out
 
 
@@ -138,26 +287,50 @@ def failure_note(summ, scene, methods):
     return '；'.join(parts) if parts else '本次运行无该场景数据'
 
 
+def sanity_report(rows):
+    flagged = [r for r in rows if r['flags']]
+    lines = ['sanity flags (%d of %d trials flagged)' % (len(flagged), len(rows)),
+             'flags: status_gap = status stream gap > 0.5 s before arrival; no_cycles = zero '
+             'planning cycles; goal_subs<2 = goal message had < 2 subscribers; late_start; '
+             'retried = attempts > 1; rtf<0.9']
+    lines += ['%s: %s' % (r['trial_id'], r['flags'].replace(';', ', ')) for r in flagged]
+    if not flagged:
+        lines.append('no flagged trials')
+    return '\n'.join(lines) + '\n'
+
+
 # ----------------------------------------------------------------------------- LaTeX tables
-def static_table(summ, scene):
+STD_NOTE = '$\\pm$ 前为均值，后为样本标准差（$n-1$ 归一化，$n<2$ 时记为 --）'
+ESTOP_NOTE = ('急停为各方法统一口径：自首个非零速度指令起至到达（未到达则至试验结束）止，'
+              '下发的 $\\mathrm{cmd\\_vel}$ 恰为全零的上升沿次数')
+EG_NOTE = '$e_g$ 为到达后停稳窗口结束时的目标距离'
+EG_LEGACY_NOTE = '（无停稳记录的旧数据中 $e_g$ 取到达时刻距离）'
+
+
+def static_table(summ, scene, legacy_eg=False):
     lines = [r'\begin{table}[!htb]', '\t\\centering',
              '\t\\caption{静态环境测试统计表}', '\t\\label{tab:静态仿真结果}', '\t\\small',
-             '\t\\begin{tabular}{lccccccc}', '\t\t\\toprule',
+             '\t\\begin{tabular}{lcccccccc}', '\t\t\\toprule',
              '\t\t方法 & $SR$/\\% & $T$/s & $L$/m & $e_g$/m & $d_{\\mathrm{obs}}^{\\min}$/m'
-             ' & $J_{\\Delta u}$ & 平均耗时/ms \\\\', '\t\t\\midrule']
+             ' & $J_{v}$ & $J_{\\omega}$ & 平均耗时/ms \\\\', '\t\t\\midrule']
     for m in METHODS:
         a = summ.get((scene, m))
         if a is None:
-            lines.append('\t\t%s & %s \\\\' % (DISPLAY[m], ' & '.join(['--'] * 7)))
+            lines.append('\t\t%s & %s \\\\' % (DISPLAY[m], ' & '.join(['--'] * 8)))
             continue
         cells = [f1(a['SR']), pm(a['T_mean'], a['T_std']), pm(a['L_mean'], a['L_std']),
                  pm(a['e_g_mean'], a['e_g_std']), pm(a['d_min_body_mean'], a['d_min_body_std']),
-                 pm(a['J_du_mean'], a['J_du_std']), f2(a['t_avg'])]
+                 pm(a['J_v_mean'], a['J_v_std']), pm(a['J_w_mean'], a['J_w_std']),
+                 f2(a['t_avg'])]
         lines.append('\t\t%s & %s \\\\' % (DISPLAY[m], ' & '.join(cells)))
     present = [m for m in METHODS if (scene, m) in summ]
     lines += ['\t\t\\bottomrule', '\t\\end{tabular}',
-              '\t\\par\\vspace{2pt}\\footnotesize 注：$T$、$L$、$e_g$、$J_{\\Delta u}$ 仅对成功试验'
-              '统计；$d_{\\mathrm{obs}}^{\\min}$ 为全部试验各自最小物理轮廓间隙的均值$\\pm$标准差。'
+              '\t\\par\\vspace{2pt}\\footnotesize 注：表中 ' + STD_NOTE + '。$T$、$L$、$e_g$、$J_{v}$、'
+              '$J_{\\omega}$ 仅对成功试验统计，$T$ 为从发出目标到首次进入到达阈值的时间，'
+              '$J_{v}=\\sum\\|\\Delta(v_x,v_y)\\|^2$、$J_{\\omega}=\\sum(\\Delta\\omega)^2$ '
+              '取至到达时刻的下发指令；' + EG_NOTE + (EG_LEGACY_NOTE if legacy_eg else '') +
+              '；$d_{\\mathrm{obs}}^{\\min}$ 为全部试验各自最小物理轮廓间隙的均值$\\pm$样本标准差；'
+              '平均耗时由该方法全部试验（含失败试验）的全部规划周期合并计算。'
               '失败类型计数——' + failure_note(summ, scene, present) + '。',
               r'\end{table}']
     return '\n'.join(lines)
@@ -166,24 +339,78 @@ def static_table(summ, scene):
 def dynamic_table(summ, scene):
     lines = [r'\begin{table}[!htb]', '\t\\centering',
              '\t\\caption{复杂动态环境测试统计表}', '\t\\label{tab:动态仿真结果}', '\t\\small',
-             '\t\\begin{tabular}{lccccccc}', '\t\t\\toprule',
+             '\t\\begin{tabular}{lcccccccc}', '\t\t\\toprule',
              '\t\t方法 & $SR$/\\% & 碰撞/次 & 急停/次 & $T$/s & $d_{\\mathrm{obs}}^{\\min}$/m'
-             ' & $J_{\\Delta u}$ & 平均耗时/ms \\\\', '\t\t\\midrule']
+             ' & $J_{v}$ & $J_{\\omega}$ & 平均耗时/ms \\\\', '\t\t\\midrule']
     for m in METHODS:
         a = summ.get((scene, m))
         if a is None:
-            lines.append('\t\t%s & %s \\\\' % (DISPLAY[m], ' & '.join(['--'] * 7)))
+            lines.append('\t\t%s & %s \\\\' % (DISPLAY[m], ' & '.join(['--'] * 8)))
             continue
         cells = [f1(a['SR']), str(a['collisions_total']), str(a['estops_total']),
                  pm(a['T_mean'], a['T_std']), pm(a['d_min_body_mean'], a['d_min_body_std']),
-                 pm(a['J_du_mean'], a['J_du_std']), f2(a['t_avg'])]
+                 pm(a['J_v_mean'], a['J_v_std']), pm(a['J_w_mean'], a['J_w_std']),
+                 f2(a['t_avg'])]
         lines.append('\t\t%s & %s \\\\' % (DISPLAY[m], ' & '.join(cells)))
     present = [m for m in METHODS if (scene, m) in summ]
     lines += ['\t\t\\bottomrule', '\t\\end{tabular}',
-              '\t\\par\\vspace{2pt}\\footnotesize 注：碰撞、急停为全部试验的累计次数；$T$、'
-              '$J_{\\Delta u}$ 仅对成功试验统计；$d_{\\mathrm{obs}}^{\\min}$ 为全部试验各自最小'
-              '物理轮廓间隙的均值$\\pm$标准差。失败类型计数——'
+              '\t\\par\\vspace{2pt}\\footnotesize 注：表中 ' + STD_NOTE + '。碰撞、急停为全部试验的'
+              '累计次数；' + ESTOP_NOTE + '；$T$、$J_{v}$、$J_{\\omega}$（定义同静态表）仅对成功试验统计；'
+              '$d_{\\mathrm{obs}}^{\\min}$ 为全部试验各自最小物理轮廓间隙的均值$\\pm$样本标准差；'
+              '平均耗时由该方法全部试验（含失败试验）的全部规划周期合并计算。失败类型计数——'
               + failure_note(summ, scene, present) + '。',
+              r'\end{table}']
+    return '\n'.join(lines)
+
+
+def matched_table(msumm, scenes):
+    lines = [r'\begin{table}[!htb]', '\t\\centering',
+             '\t\\caption{配对成功试验的指标比较}', '\t\\label{tab:配对成功比较}', '\t\\small',
+             '\t\\begin{tabular}{llccccc}', '\t\t\\toprule',
+             '\t\t场景 & 方法 & 配对数 & $T$/s & $L$/m & $J_{v}$ & $J_{\\omega}$ \\\\']
+    for scene in scenes:
+        lines.append('\t\t\\midrule')
+        for mi, m in enumerate(METHODS):
+            a = msumm.get((scene, m))
+            head = '\\multirow{%d}{*}{%s}' % (len(METHODS), scene) if mi == 0 else ''
+            if a is None:
+                cells = ['--'] * 5
+            else:
+                cells = [str(a['n_matched']), pm(a['T_mean'], a['T_std']),
+                         pm(a['L_mean'], a['L_std']), pm(a['J_v_mean'], a['J_v_std']),
+                         pm(a['J_w_mean'], a['J_w_std'])]
+            lines.append('\t\t%s & %s & %s \\\\' % (head, DISPLAY[m], ' & '.join(cells)))
+    lines += ['\t\t\\bottomrule', '\t\\end{tabular}',
+              '\t\\par\\vspace{2pt}\\footnotesize 注：每个场景只统计三种方法在同一（起终点对，随机种子）'
+              '下全部成功的试验（配对数为该集合的大小），三种方法的均值在同一批试验上计算，'
+              '避免因成功试验集合不同造成的偏差；表中 ' + STD_NOTE + '。',
+              r'\end{table}']
+    return '\n'.join(lines)
+
+
+def accel_table(acc, scenes):
+    lines = [r'\begin{table}[!htb]', '\t\\centering',
+             '\t\\caption{下发指令的执行加速度统计}', '\t\\label{tab:执行加速度}', '\t\\small',
+             '\t\\begin{tabular}{llccccc}', '\t\t\\toprule',
+             '\t\t场景 & 方法 & 平移峰值/(m/s$^2$) & 平移 $p_{95}$ & 角峰值/(rad/s$^2$) '
+             '& 角 $p_{95}$ & 零指令转换/次 \\\\']
+    for scene in scenes:
+        lines.append('\t\t\\midrule')
+        for mi, m in enumerate(METHODS):
+            a = acc.get((scene, m))
+            head = '\\multirow{%d}{*}{%s}' % (len(METHODS), scene) if mi == 0 else ''
+            if a is None or not a['n_pairs']:
+                cells = ['--'] * 5
+            else:
+                cells = [f2(a['peak_lin']), f2(a['p95_lin']), f2(a['peak_ang']),
+                         f2(a['p95_ang']), str(a['n_zero_trans'])]
+            lines.append('\t\t%s & %s & %s \\\\' % (head, DISPLAY[m], ' & '.join(cells)))
+    lines += ['\t\t\\bottomrule', '\t\\end{tabular}',
+              '\t\\par\\vspace{2pt}\\footnotesize 注：由 $\\mathrm{cmd\\_vel}$ 记录中相邻两条下发指令'
+              '计算 $\\|\\Delta(v_x,v_y)\\|/\\Delta t$ 与 $|\\Delta\\omega|/\\Delta t$，'
+              '取该场景、该方法全部试验（至到达时刻，失败试验至结束）合并后的峰值与 95 分位数；'
+              '涉及全零指令的相邻对（启动、急停、到达）不计入峰值与分位数，其中零指令与非零指令'
+              '之间的转换次数列于末列。速度为车体系指令，车体转动会带来额外的坐标系旋转分量。',
               r'\end{table}']
     return '\n'.join(lines)
 
@@ -191,31 +418,35 @@ def dynamic_table(summ, scene):
 def timing_table(summ, scenes):
     lines = [r'\begin{table}[!htb]', '\t\\centering',
              '\t\\caption{局部规划实时性统计表}', '\t\\label{tab:仿真实时性}',
-             '\t\\begin{tabular}{llcccc}', '\t\t\\toprule',
+             '\t\\begin{tabular}{llccccc}', '\t\t\\toprule',
              '\t\t场景 & 方法 & $t_{\\mathrm{avg}}$/ms & $t_{95}$/ms & $t_{\\max}$/ms'
-             ' & $r_{\\mathrm{over}}$/\\% \\\\']
+             ' & $r_{\\mathrm{over}}$/\\% & RTF \\\\']
     for scene in scenes:
         lines.append('\t\t\\midrule')
         for mi, m in enumerate(METHODS):
             a = summ.get((scene, m))
             head = '\\multirow{%d}{*}{%s}' % (len(METHODS), scene) if mi == 0 else ''
             if a is None or not a['n_cycles']:
-                cells = ['--'] * 4
+                cells = ['--'] * 5
             else:
-                cells = [f2(a['t_avg']), f2(a['t95']), f2(a['t_max']), f2(a['r_over'])]
+                cells = [f2(a['t_avg']), f2(a['t95']), f2(a['t_max']), f2(a['r_over']),
+                         f2(a.get('rtf_mean', NAN))]
             lines.append('\t\t%s & %s & %s \\\\' % (head, DISPLAY[m], ' & '.join(cells)))
     lines += ['\t\t\\bottomrule', '\t\\end{tabular}',
-              '\t\\par\\vspace{2pt}\\footnotesize 注：统计量由各场景、各方法全部试验的单周期'
-              '规划耗时样本合并后计算。',
+              '\t\\par\\vspace{2pt}\\footnotesize 注：统计量由各场景、各方法全部试验（含失败试验）的'
+              '全部单周期规划耗时样本合并后计算；RTF 为仿真时间与墙钟时间之比的各试验均值'
+              '（旧数据无记录时为 --）。',
               r'\end{table}']
     return '\n'.join(lines)
 
 
-def write_tables(path, summ, scene_methods):
-    """All three tables are always emitted; cells of absent scene/method combos are '--'."""
+def write_tables(path, summ, scene_methods, msumm=None, acc=None, legacy_eg=False):
+    """All tables are always emitted; cells of absent scene/method combos are '--'."""
     scenes = [s for s in ('S1', 'S2')] + sorted(set(scene_methods) - {'S1', 'S2'})
     blocks = ['% generated by experiment/scripts/analyze.py -- do not edit by hand',
-              static_table(summ, 'S1'), dynamic_table(summ, 'S2'), timing_table(summ, scenes)]
+              static_table(summ, 'S1', legacy_eg), dynamic_table(summ, 'S2'),
+              matched_table(msumm or {}, scenes), accel_table(acc or {}, scenes),
+              timing_table(summ, scenes)]
     with open(path, 'w', encoding='utf-8') as f:
         f.write('\n\n'.join(blocks) + '\n')
 
@@ -447,14 +678,20 @@ def make_figures(out, rows, scene_methods, world_dir):
 
 # ----------------------------------------------------------------------------- main
 TRIAL_HEADER = ['trial_id', 'scene', 'method', 'pair', 'seed', 'outcome', 'success',
-                'end_reason', 'T', 'L', 'e_g', 'd_min_np', 'd_min_body', 'collisions', 'estops',
-                'J_du', 't_avg', 't95', 't_max', 'r_over', 'n_cycles', 'attempts', 'late_start',
-                'runner_patched']
+                'end_reason', 'T', 'L', 'e_g', 'e_g_arrive', 't_arrive', 'settle_s', 'd_min_np',
+                'd_min_body', 'collisions', 'estops', 'estops_planner', 'estops_src', 'J_du',
+                'J_v', 'J_w', 't_avg', 't95', 't_max', 'r_over', 'n_cycles', 'rtf', 'wall_s',
+                'attempts', 'late_start', 'goal_subscribers', 'code_check', 'status_gap_max',
+                'runner_patched', 'flags']
 SUMMARY_KEYS = ['n_trials', 'n_success', 'SR', 'T_mean', 'T_std', 'L_mean', 'L_std', 'e_g_mean',
-                'e_g_std', 'J_du_mean', 'J_du_std', 'd_min_body_min', 'd_min_body_mean',
+                'e_g_std', 'J_du_mean', 'J_du_std', 'J_v_mean', 'J_v_std', 'J_w_mean', 'J_w_std',
+                'd_min_body_min', 'd_min_body_mean',
                 'd_min_body_std', 'd_min_np_min', 'd_min_np_mean', 'd_min_np_std',
                 'collisions_total', 'collisions_mean', 'estops_total', 'estops_mean',
-                't_avg', 't95', 't_max', 'r_over', 'n_cycles', 'outcomes']
+                'estops_planner_total', 'estops_planner_mean',
+                't_avg', 't95', 't_max', 'r_over', 'n_cycles', 'rtf_mean', 'outcomes']
+MATCHED_KEYS = ['n_matched'] + [k + sfx for k in MATCH_KEYS for sfx in ('_mean', '_std')]
+ACCEL_KEYS = ['peak_lin', 'p95_lin', 'peak_ang', 'p95_ang', 'n_zero_trans', 'n_pairs', 'n_trials']
 
 
 def main(argv=None):
@@ -488,10 +725,25 @@ def main(argv=None):
         for m in scene_methods[scene]:
             s = summ[(scene, m)]
             timing.append(dict(scene=scene, method=m, t_avg=s['t_avg'], t95=s['t95'],
-                               t_max=s['t_max'], r_over=s['r_over'], n_cycles=s['n_cycles']))
+                               t_max=s['t_max'], r_over=s['r_over'], n_cycles=s['n_cycles'],
+                               rtf_mean=s['rtf_mean']))
     write_csv(os.path.join(out, 'timing.csv'),
-              ['scene', 'method', 't_avg', 't95', 't_max', 'r_over', 'n_cycles'], timing)
-    write_tables(os.path.join(out, 'tables.tex'), summ, scene_methods)
+              ['scene', 'method', 't_avg', 't95', 't_max', 'r_over', 'n_cycles', 'rtf_mean'],
+              timing)
+    matched = matched_sets(rows)
+    msumm = matched_summary(rows, matched)
+    for scene, methods in scene_methods.items():
+        write_csv(os.path.join(out, 'summary_matched_%s.csv' % scene),
+                  ['scene', 'method'] + MATCHED_KEYS,
+                  [dict(msumm[(scene, m)], scene=scene, method=m) for m in methods])
+    acc = accel_summary(rows)
+    write_csv(os.path.join(out, 'accel.csv'), ['scene', 'method'] + ACCEL_KEYS,
+              [dict(acc[(sc, m)], scene=sc, method=m)
+               for sc in sorted(scene_methods) for m in scene_methods[sc]])
+    with open(os.path.join(out, 'sanity.txt'), 'w', encoding='utf-8') as f:
+        f.write(sanity_report(rows))
+    legacy_eg = any(not r['settled'] for r in rows if r['outcome'] != 'crash')
+    write_tables(os.path.join(out, 'tables.tex'), summ, scene_methods, msumm, acc, legacy_eg)
     made = [] if a.no_figures else make_figures(out, rows, scene_methods, a.world_dir)
     print('analyzed %d trials -> %s (%d figures)' % (len(rows), out, len(made)))
     return 0
