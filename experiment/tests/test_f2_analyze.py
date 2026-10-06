@@ -182,6 +182,13 @@ class TestEndToEnd(unittest.TestCase):
         self.assertNotIn('S1_aabb_p1_s1', txt)
         self.assertNotIn('S1_dwa_p1_s1', txt)
 
+    def test_sub_cycle_pair_excluded_from_table(self):
+        import neupan_exp.metrics as mm
+        a = mm.accel_samples([0.0, 0.002, 0.102], [0.3, 0.3, 0.3], [0, 0, 0], [0.1, 0.3, 0.3],
+                             min_dt=0.05)
+        self.assertEqual(len(a['a_ang']), 1)
+        self.assertEqual(a['n_sub_cycle'], 1)
+
     def test_accel_csv_and_table(self):
         self.assertIn('\\label{tab:执行加速度}', self.tex)
         acc = {(x['scene'], x['method']): x for x in self.rows('accel.csv')}
@@ -191,7 +198,9 @@ class TestEndToEnd(unittest.TestCase):
         # non-zero-touching pairs up to t=0.6: (.3,0,0)->(.3,.1,.2): lin 1.0, ang 2.0 ; (.3..)->(.3) 0
         self.assertAlmostEqual(float(n['peak_lin']), 1.0, places=6)
         self.assertAlmostEqual(float(n['peak_ang']), 2.0, places=6)
+        self.assertAlmostEqual(float(n['peak_ang_cyc']), 2.0, places=6)
         self.assertEqual(int(n['n_zero_trans']), 3)       # 0->.3, .3->0, 0->.3 before t=0.6
+        self.assertEqual(int(n['n_sub_cycle']), 0)
 
     def test_matched_table_and_csv(self):
         self.assertIn('\\label{tab:配对成功比较}', self.tex)

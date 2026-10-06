@@ -25,6 +25,7 @@ children); if a gzserver it did not start is running, the batch aborts.
 """
 import argparse
 import datetime
+import glob
 import hashlib
 import json
 import os
@@ -525,6 +526,12 @@ GIT_SCOPES = {
     'NeuPAN': ('neupan/',),
 }
 BINARIES = [WS + '/devel/lib/local_planner/omniDWA', WS + '/devel/lib/libwaypointObstaclePlugin.so']
+# Sources this experiment consists of. The repos are dirty while the experiment is developed, so
+# git HEAD alone would not notice an edit in the middle of a batch: hash them too.
+CODE_FILES = (sorted(glob.glob(EXP_DIR + '/neupan_exp/*.py') + glob.glob(EXP_DIR + '/nodes/*.py')
+                     + glob.glob(EXP_DIR + '/scripts/*.py'))
+              + [EXP_DIR + '/launch/exp_trial.launch', EXP_DIR + '/config/scenarios.yaml',
+                 WS + '/src/neupan_ros/src/neupan_core.py'])
 
 
 def sha256_or_none(path):
@@ -636,9 +643,12 @@ def collect_environment(run=subprocess.run, read_file=None, version_fn=_py_versi
 
 
 def current_provenance(config_path=None):
-    """What the running code consists of: HEAD of the three repos + sha256 of HASHED_FILES and
-    of the compiled binaries (same keys as the manifest)."""
-    return provenance_of(git_heads(), hashed_files(config_path or EXP_DIR + '/config/scenarios.yaml'))
+    """What the running code consists of: HEAD of the three repos, sha256 of HASHED_FILES, of
+    the experiment's own sources and of the compiled binaries."""
+    files = hashed_files(config_path or EXP_DIR + '/config/scenarios.yaml')
+    heads = git_heads()
+    return {'heads': heads,
+            'sha256': provenance_of(heads, files)['sha256']}
 
 
 def _rel(p):
@@ -647,6 +657,7 @@ def _rel(p):
 
 def provenance_of(heads, files):
     sha = {_rel(p): sha256(p) for p in files}
+    sha.update({_rel(p): sha256(p) for p in CODE_FILES})
     sha.update({_rel(p): sha256_or_none(p) for p in BINARIES})
     return {'heads': dict(heads), 'sha256': sha}
 
@@ -695,17 +706,20 @@ class Manifest:
             cli_args=vars(args), argv=sys.argv, start_wall=_now(), end_wall=None,
             status='running', git=git_info(), environment=collect_environment(),
             sha256={_rel(p): sha256(p) for p in hashed_files(args.config)},
+            code_sha256={_rel(p): sha256(p) for p in CODE_FILES},
             binaries_sha256={_rel(p): sha256_or_none(p) for p in BINARIES},
             scenarios_yaml=_read(args.config),
             trials=prev.get('trials', {}), history=prev.get('history', []))
         # what every trial of this invocation is checked against (HEADs + hashes at batch start)
         self.baseline = dict(
             heads={k: v['head'] for k, v in self.data['git'].items()},
-            sha256={**self.data['sha256'], **self.data['binaries_sha256']})
+            sha256={**self.data['sha256'], **self.data['code_sha256'],
+                    **self.data['binaries_sha256']})
         if prev:
             self.data['history'].append({k: prev.get(k) for k in
                                          ('cli_args', 'start_wall', 'end_wall', 'status', 'git',
-                                          'sha256', 'binaries_sha256', 'environment')})
+                                          'sha256', 'code_sha256', 'binaries_sha256',
+                                          'environment')})
             if prev.get('scenarios_yaml') != self.data['scenarios_yaml']:
                 sys.stderr.write('WARNING: scenarios.yaml differs from the earlier invocation '
                                  'of this run\n')

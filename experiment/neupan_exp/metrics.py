@@ -155,26 +155,32 @@ def cmd_jerk_split(cmd_t, vx, vy, w, t_end=None):
     return float(np.sum(d[:, :2] ** 2)), float(np.sum(d[:, 2] ** 2))
 
 
-def accel_samples(cmd_t, vx, vy, w, t_end=None):
+def accel_samples(cmd_t, vx, vy, w, t_end=None, min_dt=0.0):
     """Executed-command accelerations between consecutive commands (t <= t_end):
-    a_lin = |d(vx,vy)|/dt, a_ang = |dw|/dt (real timestamps; pairs with dt <= 0 skipped).
+    a_lin = |d(vx,vy)|/dt, a_ang = |dw|/dt (real timestamps; pairs with dt <= min_dt skipped).
     Pairs touching an all-zero command are left out (e-stops/starts would dominate);
-    n_zero_trans counts those where exactly one of the two commands is all-zero."""
+    n_zero_trans counts those where exactly one of the two commands is all-zero.
+    min_dt > 0 drops pairs closer together than that (planners may publish twice within one
+    control cycle, which would divide a normal step by a near-zero interval);
+    n_sub_cycle counts the non-zero-transition pairs dropped for that reason."""
     t, u = _cmd_arrays(cmd_t, vx, vy, w, t_end)
-    a_lin, a_ang, trans = [], [], 0
+    a_lin, a_ang, trans, sub = [], [], 0, 0
     if len(t) >= 2:
         z = _zero_rows(u)
         for i in range(1, len(t)):
             dt = t[i] - t[i - 1]
-            if dt <= 0:
-                continue
             if z[i] != z[i - 1]:
                 trans += 1
-            if z[i] or z[i - 1]:
+                continue
+            if z[i] or z[i - 1] or dt <= 0:
+                continue
+            if dt < min_dt:
+                sub += 1
                 continue
             a_lin.append(float(np.hypot(u[i, 0] - u[i - 1, 0], u[i, 1] - u[i - 1, 1]) / dt))
             a_ang.append(float(abs(u[i, 2] - u[i - 1, 2]) / dt))
-    return dict(a_lin=np.array(a_lin), a_ang=np.array(a_ang), n_zero_trans=trans)
+    return dict(a_lin=np.array(a_lin), a_ang=np.array(a_ang), n_zero_trans=trans,
+                n_sub_cycle=sub)
 
 
 def status_gap_max(st_t, t_end):

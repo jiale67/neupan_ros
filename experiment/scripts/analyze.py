@@ -38,6 +38,7 @@ STYLES = {'neupan': '-', 'aabb': '--', 'dwa': '-.'}
 FONT_CANDIDATES = ('SimHei', 'Noto Sans CJK SC', 'Noto Sans CJK JP', 'Noto Sans CJK TC',
                    'WenQuanYi Zen Hei')
 NAN = float('nan')
+CTRL_PERIOD = 0.1            # experiment control period (s), see global constraints
 
 ROW_KEYS = ('T', 'L', 'e_g', 'd_min_np', 'd_min_body', 'collisions', 'J_du', 't_avg',
             't95', 't_max', 'r_over', 'n_cycles')
@@ -65,8 +66,8 @@ def arrival_time(d):
 def command_metrics(base, t_arrive, planner_estops):
     """Metrics derived from <base>_cmd.csv (commands up to t_arrive, or all if it is None)."""
     c = read_csv_cols(base + '_cmd.csv')
-    out = dict(estops=planner_estops, estops_src='planner', J_v=NAN, J_w=NAN,
-               a_lin=[], a_ang=[], n_zero_trans=0)
+    out = dict(estops=planner_estops, estops_src='planner', J_v=NAN, J_w=NAN, a_lin=[], a_ang=[],
+               a_lin_cyc=[], a_ang_cyc=[], n_zero_trans=0, n_sub_cycle=0)
     if c is None or not len(c.get('t', [])):
         return out
     t_end = t_arrive
@@ -74,7 +75,13 @@ def command_metrics(base, t_arrive, planner_estops):
     out['estops_src'] = 'cmd'
     out['J_v'], out['J_w'] = cmd_jerk_split(c['t'], c['vx'], c['vy'], c['w'], t_end)
     a = accel_samples(c['t'], c['vx'], c['vy'], c['w'], t_end)
-    out.update(a_lin=list(a['a_lin']), a_ang=list(a['a_ang']), n_zero_trans=a['n_zero_trans'])
+    # same, but ignoring pairs published closer together than half a control cycle (a planner
+    # may publish twice inside one 0.1 s cycle; dividing by that dt is meaningless). Its
+    # n_sub_cycle counts the pairs dropped for exactly that reason.
+    ac = accel_samples(c['t'], c['vx'], c['vy'], c['w'], t_end, min_dt=CTRL_PERIOD / 2.0)
+    out.update(a_lin=list(a['a_lin']), a_ang=list(a['a_ang']), n_zero_trans=a['n_zero_trans'],
+               n_sub_cycle=ac['n_sub_cycle'], a_lin_cyc=list(ac['a_lin']),
+               a_ang_cyc=list(ac['a_ang']))
     return out
 
 
@@ -260,20 +267,31 @@ def matched_summary(rows, matched):
     return res
 
 
+def _accel_stats(rs, lin_key, ang_key):
+    lin = np.array([v for r in rs for v in r.get(lin_key, [])], float)
+    ang = np.array([v for r in rs for v in r.get(ang_key, [])], float)
+    return dict(
+        peak_lin=float(lin.max()) if lin.size else NAN,
+        p95_lin=float(np.percentile(lin, 95)) if lin.size else NAN,
+        peak_ang=float(ang.max()) if ang.size else NAN,
+        p95_ang=float(np.percentile(ang, 95)) if ang.size else NAN,
+        n_pairs=int(lin.size))
+
+
 def accel_summary(rows):
-    """{(scene, method): peak/p95 of the pooled executed accelerations + counts}."""
+    """{(scene, method): peak/p95 of the pooled executed accelerations + counts}.
+    `*` are the raw consecutive-command values (used in the table), `*_cyc` the same over
+    command pairs at least half a control cycle apart, `n_sub_cycle` how many raw pairs were
+    closer together than that."""
     g, _ = group(rows)
     out = {}
     for key, rs in g.items():
-        lin = np.array([v for r in rs for v in r.get('a_lin', [])], float)
-        ang = np.array([v for r in rs for v in r.get('a_ang', [])], float)
-        out[key] = dict(
-            peak_lin=float(lin.max()) if lin.size else NAN,
-            p95_lin=float(np.percentile(lin, 95)) if lin.size else NAN,
-            peak_ang=float(ang.max()) if ang.size else NAN,
-            p95_ang=float(np.percentile(ang, 95)) if ang.size else NAN,
-            n_zero_trans=int(sum(r.get('n_zero_trans', 0) for r in rs)),
-            n_pairs=int(lin.size), n_trials=len(rs))
+        a = _accel_stats(rs, 'a_lin', 'a_ang')
+        a.update({k + '_cyc': v for k, v in _accel_stats(rs, 'a_lin_cyc', 'a_ang_cyc').items()})
+        a['n_zero_trans'] = int(sum(r.get('n_zero_trans', 0) for r in rs))
+        a['n_sub_cycle'] = int(sum(r.get('n_sub_cycle', 0) for r in rs))
+        a['n_trials'] = len(rs)
+        out[key] = a
     return out
 
 
@@ -399,18 +417,21 @@ def accel_table(acc, scenes):
         for mi, m in enumerate(METHODS):
             a = acc.get((scene, m))
             head = '\\multirow{%d}{*}{%s}' % (len(METHODS), scene) if mi == 0 else ''
-            if a is None or not a['n_pairs']:
+            if a is None or not a['n_pairs_cyc']:
                 cells = ['--'] * 5
             else:
-                cells = [f2(a['peak_lin']), f2(a['p95_lin']), f2(a['peak_ang']),
-                         f2(a['p95_ang']), str(a['n_zero_trans'])]
+                cells = [f2(a['peak_lin_cyc']), f2(a['p95_lin_cyc']), f2(a['peak_ang_cyc']),
+                         f2(a['p95_ang_cyc']), str(a['n_zero_trans'])]
             lines.append('\t\t%s & %s & %s \\\\' % (head, DISPLAY[m], ' & '.join(cells)))
     lines += ['\t\t\\bottomrule', '\t\\end{tabular}',
               '\t\\par\\vspace{2pt}\\footnotesize 注：由 $\\mathrm{cmd\\_vel}$ 记录中相邻两条下发指令'
               '计算 $\\|\\Delta(v_x,v_y)\\|/\\Delta t$ 与 $|\\Delta\\omega|/\\Delta t$，'
               '取该场景、该方法全部试验（至到达时刻，失败试验至结束）合并后的峰值与 95 分位数；'
               '涉及全零指令的相邻对（启动、急停、到达）不计入峰值与分位数，其中零指令与非零指令'
-              '之间的转换次数列于末列。速度为车体系指令，车体转动会带来额外的坐标系旋转分量。',
+              '之间的转换次数列于末列；间隔小于半个控制周期（0.05 s，同一控制周期内重复下发）的'
+              '相邻对也不计入，其条数与不做该过滤的峰值另存于 accel.csv。$\\Delta t$ 取相邻两条'
+              '指令的真实时间间隔。速度为车体系指令，车体转向时该坐标系随之旋转，会带来额外的'
+              '旋转分量。',
               r'\end{table}']
     return '\n'.join(lines)
 
@@ -691,7 +712,9 @@ SUMMARY_KEYS = ['n_trials', 'n_success', 'SR', 'T_mean', 'T_std', 'L_mean', 'L_s
                 'estops_planner_total', 'estops_planner_mean',
                 't_avg', 't95', 't_max', 'r_over', 'n_cycles', 'rtf_mean', 'outcomes']
 MATCHED_KEYS = ['n_matched'] + [k + sfx for k in MATCH_KEYS for sfx in ('_mean', '_std')]
-ACCEL_KEYS = ['peak_lin', 'p95_lin', 'peak_ang', 'p95_ang', 'n_zero_trans', 'n_pairs', 'n_trials']
+ACCEL_KEYS = ['peak_lin', 'p95_lin', 'peak_ang', 'p95_ang', 'n_zero_trans', 'n_sub_cycle',
+              'n_pairs', 'n_trials', 'peak_lin_cyc', 'p95_lin_cyc', 'peak_ang_cyc',
+              'p95_ang_cyc', 'n_pairs_cyc']
 
 
 def main(argv=None):

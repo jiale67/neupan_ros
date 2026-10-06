@@ -68,6 +68,30 @@ class TestProvenance(unittest.TestCase):
             self.assertEqual(j['meta']['code_check'], 'ok')
 
 
+class TestCodeFiles(unittest.TestCase):
+    def test_code_files_cover_the_experiment_sources(self):
+        import glob as _glob
+        code = set(rb.CODE_FILES)
+        for name in ('nodes/trial_recorder.py', 'launch/exp_trial.launch',
+                     'config/scenarios.yaml'):
+            self.assertIn('%s/experiment/%s' % (rb.WS + '/src/neupan_ros', name), code)
+        self.assertIn(rb.WS + '/src/neupan_ros/src/neupan_core.py', code)
+        self.assertTrue(any(p.endswith('/experiment/scripts/analyze.py') for p in code))
+        self.assertTrue(any(p.endswith('/experiment/neupan_exp/metrics.py') for p in code))
+        self.assertGreaterEqual(len(code), len(_glob.glob(rb.EXP_DIR + '/scripts/*.py')))
+        for p in code:
+            self.assertTrue(os.path.exists(p), p)
+
+    def test_modified_source_changes_provenance(self):
+        a = rb.provenance_of({'r': 'h'}, ['/nonexistent/target'])
+        self.assertIn('src/neupan_ros/experiment/neupan_exp/metrics.py', a['sha256'])
+        b = dict(a['sha256'])
+        b['src/neupan_ros/experiment/neupan_exp/metrics.py'] = 'edited'
+        self.assertEqual(rb.verify_provenance(a, {'heads': {'r': 'h'}, 'sha256': b}),
+                         ['sha256 of src/neupan_ros/experiment/neupan_exp/metrics.py: %s -> edited'
+                          % a['sha256']['src/neupan_ros/experiment/neupan_exp/metrics.py']])
+
+
 class TestEnvironment(unittest.TestCase):
     def test_keys_with_fakes(self):
         def run(argv, **kw):

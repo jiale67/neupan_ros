@@ -186,6 +186,18 @@ class TestAccel(unittest.TestCase):
         b = accel_samples(t, [0.0, 0.05, 0.05], [0, 0, 0], [0.1, 0.1, 0.1], t_end=0.1)
         self.assertEqual(len(b['a_lin']), 1)
 
+    def test_sub_cycle_pairs_dropped_as_asked(self):
+        t = [0.0, 0.002, 0.102]
+        vx = [0.1, 0.3, 0.3]
+        z = [0.0, 0.0, 0.0]
+        a = accel_samples(t, vx, z, z, min_dt=0.05)
+        self.assertEqual(len(a['a_lin']), 1)
+        self.assertEqual(a['n_sub_cycle'], 1)
+        self.assertAlmostEqual(float(a['a_lin'][0]), 0.0, places=9)
+        b = accel_samples(t, vx, z, z)
+        self.assertEqual(b['n_sub_cycle'], 0)
+        self.assertEqual(len(b['a_lin']), 2)
+
     def test_nonpositive_dt_skipped(self):
         a = accel_samples([0.0, 0.0, 0.1], [0.1, 0.2, 0.3], [0, 0, 0], [0.1, 0.1, 0.1])
         np.testing.assert_allclose(a['a_lin'], [1.0], atol=1e-9)
