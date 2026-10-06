@@ -221,10 +221,14 @@ class TestEndToEnd(unittest.TestCase):
         self.assertAlmostEqual(float(t[('S1', 'neupan')]['rtf_mean']), 0.8)
         self.assertEqual(t[('S1', 'dwa')]['rtf_mean'], 'nan')
 
-    def test_single_trial_std_is_dashes(self):
-        # one success per cell -> sample std undefined -> printed '--'
-        self.assertIn('--', self.tex)
+    def test_single_trial_std_prints_mean_only(self):
+        # one success per cell -> sample std undefined -> mean alone, no '+- 0.00'
+        self.assertIn('AABB-MPC & 100.0 & $0.70$ & $3.00$ &', self.tex)  # mean of one trial
         self.assertNotIn('\\pm 0.00', self.tex)
+        # DWA never arrived: no T/L/J columns (d_min_body still comes from all trials)
+        row = [l for l in self.tex.splitlines() if l.strip().startswith('DWA & 0.0')][0]
+        self.assertEqual([c.strip() for c in row.split('&')][1:],
+                         ['0.0', '--', '--', '--', '$0.30$', '--', '--', '10.00 \\\\'])
 
 
 class TestOldData(unittest.TestCase):

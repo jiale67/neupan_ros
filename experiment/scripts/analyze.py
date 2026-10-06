@@ -172,8 +172,11 @@ def f2(v):
 
 
 def pm(mean, std):
-    """mean +- SAMPLE std; '--' when either is undefined (n < 2 has no sample std)."""
-    return '$%.2f\\pm %.2f$' % (mean, std) if _finite(mean) and _finite(std) else '--'
+    """mean +- SAMPLE std. Without a std (n < 2 values) only the mean is printed, '--' if the
+    mean itself is undefined (no value at all)."""
+    if not _finite(mean):
+        return '--'
+    return '$%.2f\\pm %.2f$' % (mean, std) if _finite(std) else '$%.2f$' % mean
 
 
 def f1(v):
@@ -318,7 +321,7 @@ def sanity_report(rows):
 
 
 # ----------------------------------------------------------------------------- LaTeX tables
-STD_NOTE = '$\\pm$ 前为均值，后为样本标准差（$n-1$ 归一化，$n<2$ 时记为 --）'
+STD_NOTE = '$\\pm$ 前为均值，后为样本标准差（$n-1$ 归一化；样本不足 2 个时只列均值）'
 ESTOP_NOTE = ('急停为各方法统一口径：自首个非零速度指令起至到达（未到达则至试验结束）止，'
               '下发的 $\\mathrm{cmd\\_vel}$ 恰为全零的上升沿次数')
 EG_NOTE = '$e_g$ 为到达后停稳窗口结束时的目标距离'
