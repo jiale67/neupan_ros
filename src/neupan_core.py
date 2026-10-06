@@ -309,6 +309,20 @@ class neupan_core:
         )
         # print()
 
+        # first_step_rate_limit 的 ctrl_period 必须等于实际下发周期 1/control_rate，否则
+        # 限速量级不对。独立 launch 的 control_rate 默认 50 Hz，而 yaml 写的是 0.1 s。
+        _robot = self.neupan_planner.robot
+        if getattr(_robot, "first_step_rate_limit", False) and abs(
+            1.0 / self.control_rate - float(_robot.ctrl_period)
+        ) > 1e-6:
+            rospy.logwarn(
+                "first_step_rate_limit is on but 1/control_rate = %.4f s differs from "
+                "robot.ctrl_period = %.4f s in the planner yaml; the rate limit assumes "
+                "ctrl_period is the real command period (set ~control_rate to %.1f Hz or "
+                "fix ctrl_period)",
+                1.0 / self.control_rate, float(_robot.ctrl_period), 1.0 / float(_robot.ctrl_period),
+            )
+
         # loop 只能在 planner 建好后改：init_from_yaml 会把 ipath 整段替换掉，
         # 从外面传 ipath={'loop':...} 会丢掉 yaml 里其余的 ipath 配置。
         if str(loop_para).strip():
