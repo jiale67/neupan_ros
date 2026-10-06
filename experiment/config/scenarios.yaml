@@ -4,7 +4,7 @@ scenes:
   S1:
     world: static_scene
     runs: 5
-    start_sim_time: 10.0
+    start_sim_time: 30.0
     pairs:
       - {id: 1, start: [-9.0, -7.0], goal: [6.0, 6.5]}
       - {id: 2, start: [-9.0, 6.0], goal: [6.0, -7.0]}
@@ -13,7 +13,7 @@ scenes:
   S2:
     world: dynamic_scene
     runs: 10
-    start_sim_time: {base: 10.0, spread: 30.0}
+    start_sim_time: {base: 30.0, spread: 30.0}
     pairs:
       - {id: 1, start: [-3.6, -3.6], goal: [3.6, 3.6]}
       - {id: 2, start: [3.6, -3.6], goal: [-3.6, 3.6]}

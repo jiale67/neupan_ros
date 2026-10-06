@@ -19,7 +19,7 @@ class TestScenarios(unittest.TestCase):
         t = trial_matrix(self.cfg, ['S1'], ['neupan'])[0]
         self.assertEqual(t.trial_id, '%s_%s_p%d_s%d' % (t.scene, t.method, t.pair_id, t.seed))
         self.assertEqual(t.world, 'static_scene')
-        self.assertEqual(t.start_sim_time, 10.0)
+        self.assertEqual(t.start_sim_time, 30.0)
         self.assertAlmostEqual(t.start[2], math.atan2(t.goal[1] - t.start[1], t.goal[0] - t.start[0]))
 
     def test_trial_matrix_shared_seeds(self):
@@ -29,7 +29,7 @@ class TestScenarios(unittest.TestCase):
             if t.method == 'neupan':
                 o = by[('dwa', t.pair_id, t.seed)]
                 self.assertEqual(o.start_sim_time, t.start_sim_time)
-                self.assertTrue(10.0 <= t.start_sim_time <= 40.0)
+                self.assertTrue(30.0 <= t.start_sim_time <= 60.0)
                 self.assertEqual(t.world, 'dynamic_scene')
         self.assertTrue(len({t.start_sim_time for t in tm}) > 10)
         self.assertEqual(sorted({t.seed for t in tm if t.pair_id == 2})[0], 2000)
