@@ -20,13 +20,18 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
 
+import os
+import sys
+import threading
+import time
+
 from neupan import neupan
 import rospy
 from geometry_msgs.msg import Twist, PoseStamped, Quaternion, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry, Path
 from visualization_msgs.msg import MarkerArray, Marker
 from sensor_msgs.msg import LaserScan, PointCloud2
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float64MultiArray
 from math import sin, cos, atan2, hypot, copysign
 import numpy as np
 from neupan.util import get_transform, WrapToPi
@@ -209,6 +214,81 @@ class neupan_core:
                 % self.start_trigger_mode
             )
 
+        # ---- 第 5 章 Gazebo 对比实验接入。下面四个参数的默认值 = 改动前的行为 ----
+        #
+        # ~control_rate: run() 的控制/规划频率 (Hz)，原来写死 rospy.Rate(50)。
+        # 实验里所有方法统一 10 Hz（规划耗时预算 100 ms）。
+        self.control_rate = float(rospy.get_param("~control_rate", "50.0"))
+
+        if not (np.isfinite(self.control_rate) and self.control_rate > 0.0):
+            raise ValueError(
+                "~control_rate expects a positive number, got: %r" % self.control_rate
+            )
+
+        # ~obstacle_velocity_source: 送进规划器的障碍点速度从哪来。
+        #   none  -> 不传速度 (velocities=None)，规划器调用与改动前完全一致
+        #   truth -> Gazebo 真值。订阅 /exp/model_states，按 ~world_file 里的障碍物
+        #            几何把激光点归到各动态障碍，速度取该障碍位置的有限差分。
+        #            真值关联只是实验辅助，不计入 /exp/planner_status 的 plan_ms。
+        self.obstacle_velocity_source = (
+            str(rospy.get_param("~obstacle_velocity_source", "none")).strip().lower()
+        )
+
+        if self.obstacle_velocity_source not in ("none", "truth"):
+            raise ValueError(
+                "~obstacle_velocity_source expects none|truth, got: %r"
+                % self.obstacle_velocity_source
+            )
+
+        # ~obstacle_repr: 激光点以什么形式喂给规划器。
+        #   points -> 原始激光点（默认）
+        #   aabb   -> 每个障碍聚成一个轴对齐包围盒，用盒边上的采样点代替原始点
+        #             （AABB-MPC 基线的输入）。有真值时按真值标签分组，没有就纯聚类。
+        #             AABB 预处理计入 plan_ms。
+        self.obstacle_repr = (
+            str(rospy.get_param("~obstacle_repr", "points")).strip().lower()
+        )
+
+        if self.obstacle_repr not in ("points", "aabb"):
+            raise ValueError(
+                "~obstacle_repr expects points|aabb, got: %r" % self.obstacle_repr
+            )
+
+        # ~world_file: Gazebo .world 路径，~obstacle_velocity_source:=truth 时必填。
+        world_file = str(rospy.get_param("~world_file", "")).strip()
+
+        # 实验库 (neupan_ros/experiment/neupan_exp) 只在非默认模式下才进 sys.path 并
+        # import：aabb 依赖 sklearn，默认路径不应该因为它没装而起不来。
+        self.truth = None  # ObstacleTruth, 仅 truth 模式
+        self.aabb_points = None  # neupan_exp.aabb.aabb_points, 仅 aabb 模式
+
+        if self.obstacle_velocity_source == "truth" or self.obstacle_repr == "aabb":
+            exp_dir = os.path.normpath(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "experiment")
+            )
+            if exp_dir not in sys.path:
+                sys.path.insert(0, exp_dir)
+
+        if self.obstacle_velocity_source == "truth":
+            if not world_file:
+                raise ValueError(
+                    "~obstacle_velocity_source:=truth needs ~world_file (the .world "
+                    "the scene was loaded from)"
+                )
+
+            from neupan_exp.world import parse_world
+            from neupan_exp.truth import ObstacleTruth
+
+            self.truth = ObstacleTruth(parse_world(world_file))
+            # /exp/model_states 的回调在 rospy 的订阅线程里写 truth，run() 在主线程里读。
+            self.truth_lock = threading.Lock()
+            self.truth_last_t = None  # 最近一次收到 model_states 的仿真时间
+
+        if self.obstacle_repr == "aabb":
+            from neupan_exp.aabb import aabb_points
+
+            self.aabb_points = aabb_points
+
         # ~loop: 覆盖 yaml 的 ipath.loop。指定终点时通常要 false（到点即停），
         # yaml 默认是 True（到点后重置路径无限往复）。留空则沿用 yaml。
         #
@@ -258,6 +338,15 @@ class neupan_core:
             "/neupan_initial_path", Path, queue_size=10
         )  # initial path
 
+        # 每个规划周期一条（待命期间不发）：
+        #   data = [plan_ms, min_distance, stop, arrive]
+        #   plan_ms      time.perf_counter() 计时，含 AABB 预处理 + 规划器调用，不含真值关联
+        #   min_distance 规划器的 DUNE 最小距离 (m)，没有可用值时为 NaN
+        #   stop/arrive  0.0 / 1.0
+        self.status_pub = rospy.Publisher(
+            "/exp/planner_status", Float64MultiArray, queue_size=10
+        )
+
         ## for rviz visualization
         self.point_markers_pub_dune = rospy.Publisher(
             "/dune_point_markers", MarkerArray, queue_size=10
@@ -284,6 +373,19 @@ class neupan_core:
         #   rostopic pub -1 /neupan_start std_msgs/Bool "data: true"
         # 发 false 可以重新按下暂停（回到待命，发零速度）。
         rospy.Subscriber("/neupan_start", Bool, self.start_callback)
+
+        if self.truth is not None:
+            # /exp/model_states 是 /gazebo/model_states 经 topic_tools throttle 降到
+            # 50 Hz 的转发（exp_trial.launch 起；手动跑要自己起）。
+            from gazebo_msgs.msg import ModelStates
+
+            rospy.Subscriber("/exp/model_states", ModelStates, self.model_states_callback)
+
+        rospy.loginfo(
+            "experiment input: control_rate=%.1f Hz, obstacle_velocity_source=%s, "
+            "obstacle_repr=%s",
+            self.control_rate, self.obstacle_velocity_source, self.obstacle_repr,
+        )
 
     @staticmethod
     def parse_bool(value, default=False):
@@ -413,7 +515,7 @@ class neupan_core:
 
     def run(self):
 
-        r = rospy.Rate(50)
+        r = rospy.Rate(self.control_rate)
 
         while not rospy.is_shutdown():
 
@@ -523,15 +625,64 @@ class neupan_core:
                 r.sleep()
                 continue
 
-            if self.obstacle_points is None:
+            # scan_callback 在另一个线程里整体替换 self.obstacle_points，这里取一次快照，
+            # 保证本周期的真值关联 / AABB / 规划器看到的是同一帧。
+            points = self.obstacle_points
+
+            if points is None:
                 rospy.logwarn_throttle(
                     1, "No obstacle points, only path tracking task will be performed"
                 )
 
-            action, info = self.neupan_planner(self.robot_state, self.obstacle_points)
+            velocities = None
+            labels = None
+
+            if self.truth is not None and points is not None:
+                # 真值关联（点 -> 动态障碍 -> 速度/标签）是实验辅助，不属于方法本身，
+                # 放在 plan_ms 计时之外。
+                self.warn_if_truth_stale()
+
+                with self.truth_lock:
+                    velocities = self.truth.point_velocities(points)
+
+                    if self.obstacle_repr == "aabb":
+                        labels = self.truth.point_labels(points)
+
+            # plan_ms: AABB 预处理 + 规划器调用。
+            t_plan = time.perf_counter()
+
+            if self.obstacle_repr == "aabb" and points is not None:
+                points, velocities = self.aabb_points(points, velocities, labels)
+
+                if points.shape[1] == 0:
+                    # 没有任何包围盒点，按"没有障碍物"处理，与 obstacle_points=None 同路径。
+                    points, velocities = None, None
+
+            action, info = self.neupan_planner(self.robot_state, points, velocities)
+
+            plan_ms = (time.perf_counter() - t_plan) * 1e3
 
             self.stop = info["stop"]
             self.arrive = info["arrive"]
+
+            self.status_pub.publish(
+                Float64MultiArray(
+                    data=[
+                        plan_ms,
+                        self.planner_min_distance(),
+                        float(bool(info["stop"])),
+                        float(bool(info["arrive"])),
+                    ]
+                )
+            )
+
+            if velocities is not None:
+                # 只在非默认模式下有；默认路径 velocities 恒为 None，不做任何额外计算。
+                rospy.logdebug_throttle(
+                    1.0,
+                    "planner obstacle input: %d points (%s), %d non-zero velocity components",
+                    points.shape[1], self.obstacle_repr, np.count_nonzero(velocities),
+                )
 
             if info["arrive"]:
                 # print(action)
@@ -794,6 +945,70 @@ class neupan_core:
             if self.started:
                 self.started = False
                 rospy.logwarn("paused by /neupan_start: publishing zero velocity")
+
+    def model_states_callback(self, msg):
+
+        """
+        /exp/model_states (gazebo_msgs/ModelStates) -> ObstacleTruth。
+
+        ModelStates 没有 header，用收到时刻的仿真时间当采样时刻（use_sim_time 下
+        rospy.get_time() 即仿真钟）。ObstacleTruth 只认 world 文件里的动态障碍，
+        其余模型（机器人、静态障碍、地面）会被它自己忽略。
+        """
+
+        poses = [
+            (p.position.x, p.position.y, self.quat_to_yaw(p.orientation))
+            for p in msg.pose
+        ]
+        t = rospy.get_time()
+
+        with self.truth_lock:
+            self.truth.update(msg.name, poses, t)
+
+        self.truth_last_t = t
+
+    def warn_if_truth_stale(self):
+
+        """
+        truth 模式下 /exp/model_states 没来或断了，速度会静默变成 0（没收到过）或停在
+        最后一次的旧值（断了），实验数据就悄悄变味，所以要在日志里喊出来。
+        """
+
+        last = self.truth_last_t
+
+        if last is None:
+            rospy.logwarn_throttle(
+                5,
+                "obstacle_velocity_source=truth but no /exp/model_states received "
+                "yet: obstacle velocities are zero (is the topic_tools throttle "
+                "relay running?)",
+            )
+        elif rospy.get_time() - last > 1.0:
+            rospy.logwarn_throttle(
+                5,
+                "/exp/model_states has been silent for %.1f s: obstacle velocities "
+                "are out of date",
+                rospy.get_time() - last,
+            )
+
+    def planner_min_distance(self):
+
+        """
+        规划器 DUNE 的最小距离 (m)；没有可用值时返回 NaN。
+
+        min_distance 在还没喂过障碍点（或 pan.no_obs）时是 python float inf，喂过之后
+        是 torch 标量。两种都得接住，不能直接 .detach().item()（对 float 会
+        AttributeError）。inf 表示"没有距离信息"，同样记成 NaN。
+        """
+
+        md = self.neupan_planner.min_distance
+
+        try:
+            md = float(md.detach().item()) if hasattr(md, "detach") else float(md)
+        except (TypeError, ValueError, RuntimeError):
+            return float("nan")
+
+        return md if np.isfinite(md) else float("nan")
 
 
     def quat_to_yaw_list(self, quater):
