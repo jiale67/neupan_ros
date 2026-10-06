@@ -138,7 +138,8 @@ def crash_json(trial, reason, meta, attempt):
 # ------------------------------------------------------------------------------------ run_one
 def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None, ready=None,
             ready_timeout=120.0, clock_timeout=120.0, reset=None, poll=0.1, log_path=None,
-            attempt=1, goal_gap=0.2, exit_grace=10.0, precheck=None, goal_subscribers=None):
+            attempt=1, goal_gap=0.2, exit_grace=10.0, precheck=None, goal_subscribers=None,
+            code_check=None):
     """Run one trial; return its outcome ('success', 'collision', 'timeout', 'stuck', 'crash').
 
     launcher(trial, out_dir, meta_json, log_path) -> handle with poll() (None while running)
@@ -146,7 +147,9 @@ def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None,
     goal (frame odom); ready() -> True once the planner published /cmd_vel since the launch;
     reset() clears clock/ready state right before the launch; precheck(trial) runs before any
     old result is deleted (may raise AbortBatch); goal_subscribers() -> number of subscribers of
-    the goal topic (stored in meta). wall_timeout is the time allowed after the goal (default
+    the goal topic (stored in meta); code_check(trial) verifies that the code under test is
+    unchanged since the batch start (raises AbortBatch; meta.code_check = 'ok' afterwards).
+    wall_timeout is the time allowed after the goal (default
     timeout*1.5+90). Sim times are relative to the first /clock value of this launch (sim time
     does not start at 0). Any exception except AbortBatch/KeyboardInterrupt is turned into a
     crash json (reason=repr(e)) after the launch has been stopped.
@@ -155,12 +158,16 @@ def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None,
         wall_timeout = wall_timeout_for(trial)
     if precheck:
         precheck(trial)                  # before deleting anything: an abort keeps the old json
+    if code_check:
+        code_check(trial)
     json_path, stale = _result_paths(out_dir, trial.trial_id)
     os.makedirs(out_dir, exist_ok=True)
     for p in stale:                      # an old result must never pass for this attempt
         if os.path.exists(p):
             os.remove(p)
     meta = trial_meta(trial, attempt)
+    if code_check:
+        meta['code_check'] = 'ok'
     t_wall0 = time.time()
     handle = None
     reason = None
@@ -224,11 +231,12 @@ def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None,
                     r['meta'] = {'recorder_meta': r['meta']}
                 r['meta'].update({k: meta[k] for k in
                                   ('late_start', 'actual_start_offset', 'first_clock',
-                                   'wall_goal_time', 'attempt', 'goal_subscribers')
+                                   'wall_goal_time', 'attempt', 'goal_subscribers',
+                                   'code_check')
                                   if k in meta})
                 r['attempts'] = attempt
                 r['runner_patched'] = True   # completeness marker (the recorder never writes it)
-                r['wall_s'] = time.time() - t_wall0
+                r['wall_total_s'] = time.time() - t_wall0   # launch -> result (recorder: wall_s)
                 _atomic_json(json_path, r)
                 if exit_grace > 0:       # the launch ends by itself once the recorder is done
                     _wait_until(lambda: handle.poll() is not None, exit_grace, poll)
@@ -511,19 +519,160 @@ def _git(repo, *args):
         return 'error: %s' % e
 
 
+GIT_SCOPES = {
+    'neupan_ros': ('src/', 'experiment/', 'example/gazebo_V550/'),
+    'Autonomous_navigation_exploration': ('dwa_local_planner/', 'vehicle_simulator/'),
+    'NeuPAN': ('neupan/',),
+}
+BINARIES = [WS + '/devel/lib/local_planner/omniDWA', WS + '/devel/lib/libwaypointObstaclePlugin.so']
+
+
+def sha256_or_none(path):
+    """sha256 of a file, None if it cannot be read (e.g. not built)."""
+    h = sha256(path)
+    return None if h.startswith('unreadable') else h
+
+
+def _is_deleted(line):
+    return 'D' in line[:2]
+
+
+def count_nondeleted(lines):
+    return sum(1 for l in lines if not _is_deleted(l))
+
+
+def scope_changes(lines, prefixes):
+    """git-status porcelain lines (not deletions) whose path starts with one of prefixes
+    (for renames 'a -> b': either side)."""
+    out = []
+    for l in lines:
+        if _is_deleted(l):
+            continue
+        paths = l[3:].split(' -> ')
+        if any(p.strip('"').startswith(prefixes) for p in paths):
+            out.append(l)
+    return out
+
+
+def git_heads():
+    return {name: _git(repo, 'rev-parse', 'HEAD').strip() for name, repo in REPOS.items()}
+
+
 def git_info():
     info = {}
     for name, repo in REPOS.items():
-        lines = [l for l in _git(repo, 'status', '--porcelain').splitlines() if l.strip()]
+        lines = [l for l in _git(repo, 'status', '--porcelain', '-uall').splitlines() if l.strip()]
         by = {}
         for l in lines:
             by[l[:2]] = by.get(l[:2], 0) + 1
         info[name] = dict(head=_git(repo, 'rev-parse', 'HEAD').strip(),
                           branch=_git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').strip(),
                           n_changed=len(lines), by_status=by,
-                          # deletions are summarised by count only; the rest is listed
-                          changes_except_deleted=[l for l in lines if ' D' not in l[:2]][:200])
+                          n_nondeleted=count_nondeleted(lines),
+                          scope=list(GIT_SCOPES[name]),
+                          # deletions are summarised by count only; the in-scope rest is listed
+                          # in full (paths the experiment uses)
+                          changes_in_scope=scope_changes(lines, GIT_SCOPES[name]))
     return info
+
+
+# ------------------------------------------------------------------ environment / provenance
+def _try(fn, *a):
+    try:
+        return fn(*a)
+    except Exception:  # noqa: BLE001 - every environment probe is best effort
+        return None
+
+
+def _py_version(dist):
+    from importlib import metadata
+    try:
+        return metadata.version(dist)
+    except metadata.PackageNotFoundError:
+        return None
+
+
+def _torch_threads():
+    import torch
+    return int(torch.get_num_threads())
+
+
+def collect_environment(run=subprocess.run, read_file=None, version_fn=_py_version,
+                        threads_fn=_torch_threads, environ=None, nproc=None):
+    """Machine/software facts relevant to timing comparisons; every probe tolerates failure
+    (value None). Injectable probes for tests."""
+    read_file = read_file or _read
+    environ = os.environ if environ is None else environ
+    cpu = _try(read_file, '/proc/cpuinfo')
+    model = None
+    if cpu:
+        for l in cpu.splitlines():
+            if l.startswith('model name'):
+                model = l.split(':', 1)[1].strip()
+                break
+    mem = _try(read_file, '/proc/meminfo')
+    mem_kb = None
+    if mem:
+        for l in mem.splitlines():
+            if l.startswith('MemTotal'):
+                mem_kb = int(l.split()[1])
+                break
+    la = _try(read_file, '/proc/loadavg')
+    loadavg = [float(v) for v in la.split()[:3]] if la else None
+    gz = None
+    try:
+        r = run(['gzserver', '--version'], capture_output=True, text=True, timeout=10)
+        lines = (r.stdout or r.stderr or '').strip().splitlines()
+        gz = lines[0].strip() if lines else None
+    except Exception:  # noqa: BLE001
+        pass
+    return dict(
+        cpu_model=model, nproc=nproc if nproc is not None else os.cpu_count(),
+        loadavg=loadavg, mem_total_kb=mem_kb, python=sys.version.split()[0],
+        versions={n: _try(version_fn, n) for n in
+                  ('torch', 'cvxpy', 'cvxpylayers', 'scikit-learn', 'numpy', 'scipy')},
+        torch_num_threads=_try(threads_fn), ros_distro=environ.get('ROS_DISTRO'),
+        gzserver_version=gz)
+
+
+def current_provenance(config_path=None):
+    """What the running code consists of: HEAD of the three repos + sha256 of HASHED_FILES and
+    of the compiled binaries (same keys as the manifest)."""
+    return provenance_of(git_heads(), hashed_files(config_path or EXP_DIR + '/config/scenarios.yaml'))
+
+
+def _rel(p):
+    return os.path.relpath(p, WS) if p.startswith(WS + '/') else p
+
+
+def provenance_of(heads, files):
+    sha = {_rel(p): sha256(p) for p in files}
+    sha.update({_rel(p): sha256_or_none(p) for p in BINARIES})
+    return {'heads': dict(heads), 'sha256': sha}
+
+
+def verify_provenance(baseline, current):
+    """List of human-readable differences between two provenance dicts (empty = identical)."""
+    diffs = []
+    for k in sorted(set(baseline['heads']) | set(current['heads'])):
+        a, b = baseline['heads'].get(k), current['heads'].get(k)
+        if a != b:
+            diffs.append('git HEAD of %s: %s -> %s' % (k, a, b))
+    for k in sorted(set(baseline['sha256']) | set(current['sha256'])):
+        a, b = baseline['sha256'].get(k), current['sha256'].get(k)
+        if a != b:
+            diffs.append('sha256 of %s: %s -> %s' % (k, a, b))
+    return diffs
+
+
+def make_code_check(baseline, current_fn):
+    """code_check(trial) for run_one: AbortBatch if the code differs from `baseline`."""
+    def check(trial):
+        diffs = verify_provenance(baseline, current_fn())
+        if diffs:
+            raise AbortBatch('code changed mid-run, refusing to start trial %s:\n  %s'
+                             % (trial.trial_id, '\n  '.join(diffs)))
+    return check
 
 
 def _read(path):
@@ -544,15 +693,19 @@ class Manifest:
         self.data = dict(
             run_name=os.path.basename(os.path.normpath(os.path.dirname(path))),
             cli_args=vars(args), argv=sys.argv, start_wall=_now(), end_wall=None,
-            status='running', git=git_info(),
-            sha256={(os.path.relpath(p, WS) if p.startswith(WS + '/') else p): sha256(p)
-                    for p in hashed_files(args.config)},
+            status='running', git=git_info(), environment=collect_environment(),
+            sha256={_rel(p): sha256(p) for p in hashed_files(args.config)},
+            binaries_sha256={_rel(p): sha256_or_none(p) for p in BINARIES},
             scenarios_yaml=_read(args.config),
             trials=prev.get('trials', {}), history=prev.get('history', []))
+        # what every trial of this invocation is checked against (HEADs + hashes at batch start)
+        self.baseline = dict(
+            heads={k: v['head'] for k, v in self.data['git'].items()},
+            sha256={**self.data['sha256'], **self.data['binaries_sha256']})
         if prev:
             self.data['history'].append({k: prev.get(k) for k in
                                          ('cli_args', 'start_wall', 'end_wall', 'status', 'git',
-                                          'sha256')})
+                                          'sha256', 'binaries_sha256', 'environment')})
             if prev.get('scenarios_yaml') != self.data['scenarios_yaml']:
                 sys.stderr.write('WARNING: scenarios.yaml differs from the earlier invocation '
                                  'of this run\n')
@@ -614,7 +767,7 @@ def parse_args(argv=None):
 
 
 def run_matrix(trials, trials_dir, launcher, io, retries=1, logs_dir=None, manifest=None,
-               say=print, precheck=None, **kw):
+               say=print, precheck=None, code_check=None, **kw):
     """Run all trials in order; return {outcome: count}. A trial whose run raises (other than
     AbortBatch/KeyboardInterrupt) is recorded as a crash and the batch goes on. `io` provides
     clock, publish_goal, goal_subscribers, ready, reset, new_trial (RosIO or a fake)."""
@@ -627,7 +780,7 @@ def run_matrix(trials, trials_dir, launcher, io, retries=1, logs_dir=None, manif
             outcome = run_trial(
                 t, trials_dir, launcher, io.clock, io.publish_goal, retries=retries,
                 ready=io.ready, reset=io.reset, goal_subscribers=io.goal_subscribers,
-                precheck=precheck,
+                precheck=precheck, code_check=code_check,
                 log_path=os.path.join(logs_dir, t.trial_id + '.launch.log') if logs_dir else None,
                 **kw)
         except (AbortBatch, KeyboardInterrupt):
@@ -674,7 +827,9 @@ def main(argv=None):
         counts = run_matrix(trials, trials_dir, make_launcher(), io, retries=args.retries,
                             logs_dir=logs_dir, manifest=manifest,
                             say=lambda m: print(m, flush=True),
-                            precheck=check_no_foreign_gzserver)
+                            precheck=check_no_foreign_gzserver,
+                            code_check=make_code_check(
+                                manifest.baseline, lambda: current_provenance(args.config)))
         print('done:', counts)
     except AbortBatch as e:
         status = 'aborted'
