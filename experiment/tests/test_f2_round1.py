@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(HERE, '..', 'scripts'))
 
 import analyze  # noqa: E402
 import run_batch as rb  # noqa: E402
-from neupan_exp.metrics import accel_samples, uniform_estops  # noqa: E402
+from neupan_exp.metrics import SkipAheadQueue, accel_samples, uniform_estops  # noqa: E402
 from test_f2_analyze import write_run  # noqa: E402
 from test_f2_runner import baseline  # noqa: E402
 from test_runner import FakeClock, FakeHandle, make_trial, write_result  # noqa: E402
@@ -220,6 +220,45 @@ class TestProvenanceScopeAndDigest(unittest.TestCase):
                 meta = json.load(f)['meta']
             self.assertEqual(meta['code_check'], 'ok')
             self.assertNotIn('code_digest', meta)
+
+
+class TestSkipAheadQueue(unittest.TestCase):
+    def test_fifo_order_when_worker_keeps_up(self):
+        q = SkipAheadQueue(max_backlog=3)
+        for i in range(3):
+            q.push(i)
+        self.assertEqual([q.pop(), q.pop(), q.pop(), q.pop()], [0, 1, 2, None])
+        self.assertEqual(q.dropped, 0)
+
+    def test_backlog_beyond_limit_keeps_only_newest(self):
+        q = SkipAheadQueue(max_backlog=3)
+        for i in range(10):
+            q.push(i)
+        self.assertEqual(q.pop(), 9)
+        self.assertEqual(q.dropped, 9)
+        self.assertEqual(len(q), 0)
+        self.assertIsNone(q.pop())
+
+    def test_lag_stays_bounded_with_a_slow_worker(self):
+        # producer 2 items per tick, worker pops 1 per tick: the item it gets is always the
+        # newest or within max_backlog of it, never an ever older one
+        q = SkipAheadQueue(max_backlog=3)
+        n, lag = 0, 0
+        for _ in range(200):
+            q.push(n); q.push(n + 1); n += 2
+            got = q.pop()
+            lag = max(lag, n - 1 - got)
+        self.assertLessEqual(lag, 3)
+        self.assertGreater(q.dropped, 0)
+
+
+class TestPoseDropsFlag(unittest.TestCase):
+    def test_flag(self):
+        base = dict(estops_src='cmd', outcome='success')
+        self.assertIn('pose_drops', analyze.sanity_flags(dict(base, pose_received=100, pose_dropped=40)))
+        self.assertNotIn('pose_drops', analyze.sanity_flags(dict(base, pose_received=100, pose_dropped=10)))
+        self.assertNotIn('pose_drops', analyze.sanity_flags(dict(base)))
+        self.assertNotIn('pose_drops', analyze.sanity_flags(dict(base, pose_received='', pose_dropped='')))
 
 
 class TestLaunchThrottle(unittest.TestCase):

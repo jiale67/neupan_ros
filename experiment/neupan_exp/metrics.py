@@ -1,5 +1,6 @@
 """Per-trial metrics and cross-trial aggregation."""
 import bisect
+import collections
 import math
 
 import numpy as np
@@ -105,6 +106,36 @@ class TrialSequencer:
             self.settle_s = t - self.t_arrive
             return 'arrived'
         return None
+
+
+class SkipAheadQueue:
+    """FIFO between a cheap receive callback and a slower worker. Each item keeps the receive
+    timestamp it was stamped with, so the worker may fall behind without mis-timing anything;
+    when more than `max_backlog` items are waiting, everything but the newest is discarded
+    (counted in `dropped`) instead of letting the lag grow without bound. Not thread-safe:
+    the caller holds a lock."""
+
+    def __init__(self, max_backlog=3):
+        self.max_backlog = max_backlog
+        self.dropped = 0
+        self._d = collections.deque()
+
+    def __len__(self):
+        return len(self._d)
+
+    def push(self, item):
+        self._d.append(item)
+
+    def pop(self):
+        """Oldest item (in order), or the newest one if the backlog exceeded max_backlog;
+        None when empty."""
+        if not self._d:
+            return None
+        if len(self._d) > self.max_backlog:
+            self.dropped += len(self._d) - 1
+            while len(self._d) > 1:
+                self._d.popleft()
+        return self._d.popleft()
 
 
 def rtf_of(sim_s, wall_s):

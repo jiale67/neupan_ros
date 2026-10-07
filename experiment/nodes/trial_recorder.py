@@ -13,7 +13,9 @@ Arrival: T = t_arrive = first sample with dist_goal <= arrive_threshold. The rec
 goes on until the robot has settled (planar speed < settle_v_eps for settle_hold s, at most
 settle_max s after arrival); e_g is the goal distance at the end of that window (e_g_arrive at
 t_arrive). Collisions keep being evaluated while settling. JSON also has settle_s, rtf (sim
-seconds per wall second between t0 and the end) and wall_s (wall seconds t0 -> end).
+seconds per wall second between t0 and the end) and wall_s (wall seconds t0 -> end), plus
+pose_received / pose_dropped: /exp/model_states messages received, and those the worker skipped
+because it could not keep up (the receive callback only queues; see SkipAheadQueue).
 
 Private params: world_file, out_dir, trial_id, goal ("x y"), timeout, stuck_window (30),
 stuck_dist (0.1, progress-based), arrive_threshold (0.3), meta (JSON string, copied to the json),
@@ -35,8 +37,8 @@ from std_msgs.msg import Float64MultiArray, String
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from neupan_exp.geometry import BODY_RECT, NP_RECT, footprint_polygon  # noqa: E402
-from neupan_exp.metrics import (TrialSequencer, compute_trial_metrics, rtf_of,  # noqa: E402
-                                window_progress)
+from neupan_exp.metrics import (SkipAheadQueue, TrialSequencer,  # noqa: E402
+                                compute_trial_metrics, rtf_of, window_progress)
 from neupan_exp.truth import ObstacleTruth  # noqa: E402
 from neupan_exp.world import parse_world  # noqa: E402
 
@@ -76,6 +78,9 @@ class TrialRecorder:
         self.dyn_models = {s.name.split('/')[0] for s in specs if s.dynamic}
 
         self.lock = threading.Lock()
+        self.cond = threading.Condition()    # guards the receive queue
+        self.queue = SkipAheadQueue(max_backlog=3)
+        self.n_received = 0
         self.done = threading.Event()
         self.t0 = None
         self.wall0 = None
@@ -95,6 +100,7 @@ class TrialRecorder:
         rospy.Subscriber('/cmd_vel', Twist, self.on_cmd, queue_size=100)
         rospy.Subscriber('/exp/planner_status', Float64MultiArray, self.on_status, queue_size=100)
         rospy.Subscriber('/exp/model_states', ModelStates, self.on_models, queue_size=20)
+        threading.Thread(target=self._worker, daemon=True).start()
         rospy.loginfo('trial_recorder %s: goal=%s timeout=%.0f out_dir=%s',
                       self.trial_id, self.goal, self.timeout, self.out_dir)
 
@@ -122,24 +128,48 @@ class TrialRecorder:
                 self.status.append((rospy.get_time() - self.t0, d[0], d[1], d[2], d[3]))
 
     def on_models(self, msg):
+        """Cheap receive callback (also keeps the receive timestamps of /cmd_vel and the status
+        stream free of GIL stalls): only extracts the poses and queues them with the receive
+        time. The gap computation runs in the worker, so a slow worker can no longer back up
+        the subscription and silently time-shift the pose stream."""
         t_abs = rospy.get_time()
-        names = [n for n in msg.name if n in self.dyn_models]
-        poses = []
-        for n in names:
-            p = msg.pose[msg.name.index(n)]
-            poses.append((p.position.x, p.position.y, yaw_of(p.orientation)))
+        dyn = []
+        for n in self.dyn_models:
+            if n in msg.name:
+                p = msg.pose[msg.name.index(n)]
+                dyn.append((n, p.position.x, p.position.y, yaw_of(p.orientation)))
+        robot = None
+        if self.robot_name in msg.name:
+            p = msg.pose[msg.name.index(self.robot_name)]
+            robot = (p.position.x, p.position.y, yaw_of(p.orientation))
+        with self.cond:
+            self.n_received += 1
+            self.queue.push((t_abs, dyn, robot))
+            self.cond.notify()
+
+    def _worker(self):
+        while not self.done.is_set() and not rospy.is_shutdown():
+            with self.cond:
+                item = self.queue.pop()
+                if item is None:
+                    self.cond.wait(0.2)
+                    continue
+            self._process(*item)
+
+    def _process(self, t_abs, dyn, robot):
+        names = [d[0] for d in dyn]
+        poses = [d[1:] for d in dyn]
         with self.lock:
             self.truth.update(names, poses, t_abs)
-            if not self._active() or self.robot_name not in msg.name:
+            if not self._active() or robot is None:
                 return
             t = t_abs - self.t0
             if t >= self.next_obs_t - 1e-6:       # dynamic obstacles, time-decimated
                 self.next_obs_t = max(self.next_obs_t + self.obs_period,
                                       t - 0.5 * self.obs_period)
                 for n, q in zip(names, poses):
-                    self.obs.append((t, n) + q)
-            p = msg.pose[msg.name.index(self.robot_name)]
-            x, y, yaw = p.position.x, p.position.y, yaw_of(p.orientation)
+                    self.obs.append((t, n) + tuple(q))
+            x, y, yaw = robot
             gap_np, near = self.truth.min_gap(footprint_polygon(x, y, yaw, *NP_RECT))
             gap_body, _ = self.truth.min_gap(footprint_polygon(x, y, yaw, *BODY_RECT))
             dist = math.hypot(x - self.goal[0], y - self.goal[1])
@@ -191,6 +221,7 @@ class TrialRecorder:
         m.update(end_reason=self.reason, trial_id=self.trial_id, goal=list(self.goal),
                  meta=self.meta, t_arrive=self.seq.t_arrive, settle_s=self.seq.settle_s,
                  e_g_arrive=self.seq.e_g_arrive, wall_s=wall_s,
+                 pose_received=self.n_received, pose_dropped=self.queue.dropped,
                  rtf=rtf_of(self.sim_end, wall_s))
         with open(base + '.json', 'w') as f:
             json.dump(m, f, indent=1)

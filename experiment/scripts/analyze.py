@@ -110,6 +110,9 @@ def sanity_flags(d):
         f.append('rtf<0.9')
     if d.get('estops_src') == 'planner' and d.get('outcome') != 'crash':
         f.append('estops_fallback')
+    rec, drop = _num(d.get('pose_received')), _num(d.get('pose_dropped'))
+    if rec and drop is not None and drop / rec > 0.3:
+        f.append('pose_drops')
     return f
 
 
@@ -156,6 +159,7 @@ def load_trials(results):
                  has_settle_key='settle_s' in d,
                  rtf=_num(d.get('rtf')) if _num(d.get('rtf')) is not None else NAN,
                  wall_s=_num(d.get('wall_s')) if _num(d.get('wall_s')) is not None else NAN,
+                 pose_received=d.get('pose_received', ''), pose_dropped=d.get('pose_dropped', ''),
                  goal_subscribers=meta.get('goal_subscribers', ''),
                  code_check=meta.get('code_check', ''),
                  status_gap_max=_status_gap(base, ta),
@@ -328,7 +332,8 @@ def sanity_report(rows):
     lines = ['sanity flags (%d of %d trials flagged)' % (len(flagged), len(rows)),
              'flags: status_gap = status stream gap > 0.5 s before arrival; no_cycles = zero '
              'planning cycles; goal_subs<2 = goal message had < 2 subscribers; late_start; '
-             'retried = attempts > 1; rtf<0.9']
+             'retried = attempts > 1; rtf<0.9; estops_fallback = no _cmd.csv, planner e-stop count '
+             'used; pose_drops = recorder skipped > 30% of the pose messages (overloaded)']
     lines += ['%s: %s' % (r['trial_id'], r['flags'].replace(';', ', ')) for r in flagged]
     if not flagged:
         lines.append('no flagged trials')
@@ -724,6 +729,7 @@ TRIAL_HEADER = ['trial_id', 'scene', 'method', 'pair', 'seed', 'outcome', 'succe
                 'd_min_body', 'collisions', 'estops', 'estops_planner', 'estops_src', 'J_du',
                 'J_v', 'J_w', 't_avg', 't95', 't_max', 'r_over', 'n_cycles', 'rtf', 'wall_s',
                 'attempts', 'late_start', 'goal_subscribers', 'code_check', 'status_gap_max',
+                'pose_received', 'pose_dropped',
                 'runner_patched', 'flags']
 SUMMARY_KEYS = ['n_trials', 'n_success', 'SR', 'T_mean', 'T_std', 'L_mean', 'L_std', 'e_g_mean',
                 'e_g_std', 'J_du_mean', 'J_du_std', 'J_v_mean', 'J_v_std', 'J_w_mean', 'J_w_std',
