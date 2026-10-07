@@ -14,8 +14,11 @@ goes on until the robot has settled (planar speed < settle_v_eps for settle_hold
 settle_max s after arrival); e_g is the goal distance at the end of that window (e_g_arrive at
 t_arrive). Collisions keep being evaluated while settling. JSON also has settle_s, rtf (sim
 seconds per wall second between t0 and the end) and wall_s (wall seconds t0 -> end), plus
-pose_received / pose_dropped: /exp/model_states messages received, and those the worker skipped
-because it could not keep up (the receive callback only queues; see SkipAheadQueue).
+pose_received / pose_dropped: /exp/model_states messages received while the trial was active
+(t0 until the end) and those the worker skipped because it could not keep up (the receive
+callback only queues, the worker always takes the newest message; see SkipAheadQueue);
+pose_max_gap: largest gap between two recorded poses; pose_errors: messages whose processing
+raised (logged, the worker carries on).
 
 Private params: world_file, out_dir, trial_id, goal ("x y"), timeout, stuck_window (30),
 stuck_dist (0.1, progress-based), arrive_threshold (0.3), meta (JSON string, copied to the json),
@@ -37,8 +40,9 @@ from std_msgs.msg import Float64MultiArray, String
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from neupan_exp.geometry import BODY_RECT, NP_RECT, footprint_polygon  # noqa: E402
-from neupan_exp.metrics import (SkipAheadQueue, TrialSequencer,  # noqa: E402
-                                compute_trial_metrics, rtf_of, window_progress)
+from neupan_exp.metrics import (POSE_MAX_BACKLOG, SkipAheadQueue, TrialSequencer,  # noqa: E402
+                                compute_trial_metrics, guarded_call, max_gap, rtf_of,
+                                window_progress)
 from neupan_exp.truth import ObstacleTruth  # noqa: E402
 from neupan_exp.world import parse_world  # noqa: E402
 
@@ -79,8 +83,10 @@ class TrialRecorder:
 
         self.lock = threading.Lock()
         self.cond = threading.Condition()    # guards the receive queue
-        self.queue = SkipAheadQueue(max_backlog=3)
-        self.n_received = 0
+        self.queue = SkipAheadQueue(max_backlog=POSE_MAX_BACKLOG)
+        self.n_in_trial = 0      # messages received / skipped while the trial is active
+        self.n_dropped = 0
+        self.n_errors = 0
         self.done = threading.Event()
         self.t0 = None
         self.wall0 = None
@@ -143,26 +149,36 @@ class TrialRecorder:
             p = msg.pose[msg.name.index(self.robot_name)]
             robot = (p.position.x, p.position.y, yaw_of(p.orientation))
         with self.cond:
-            self.n_received += 1
             self.queue.push((t_abs, dyn, robot))
             self.cond.notify()
 
     def _worker(self):
         while not self.done.is_set() and not rospy.is_shutdown():
             with self.cond:
+                before = self.queue.dropped
                 item = self.queue.pop()
                 if item is None:
                     self.cond.wait(0.2)
                     continue
-            self._process(*item)
+                skipped = self.queue.dropped - before
+            guarded_call(self._process, item + (skipped,), self._on_worker_error)
 
-    def _process(self, t_abs, dyn, robot):
+    def _on_worker_error(self, exc, tb):
+        with self.lock:
+            self.n_errors += 1
+        rospy.logerr('trial %s: pose processing failed (%r); continuing with the next message\n%s',
+                     self.trial_id, exc, tb)
+
+    def _process(self, t_abs, dyn, robot, skipped=0):
         names = [d[0] for d in dyn]
         poses = [d[1:] for d in dyn]
         with self.lock:
             self.truth.update(names, poses, t_abs)
             if not self._active() or robot is None:
                 return
+            # in-trial statistics only (the ~30 s before the goal message would dilute them)
+            self.n_in_trial += 1 + skipped
+            self.n_dropped += skipped
             t = t_abs - self.t0
             if t >= self.next_obs_t - 1e-6:       # dynamic obstacles, time-decimated
                 self.next_obs_t = max(self.next_obs_t + self.obs_period,
@@ -221,7 +237,8 @@ class TrialRecorder:
         m.update(end_reason=self.reason, trial_id=self.trial_id, goal=list(self.goal),
                  meta=self.meta, t_arrive=self.seq.t_arrive, settle_s=self.seq.settle_s,
                  e_g_arrive=self.seq.e_g_arrive, wall_s=wall_s,
-                 pose_received=self.n_received, pose_dropped=self.queue.dropped,
+                 pose_received=self.n_in_trial, pose_dropped=self.n_dropped,
+                 pose_max_gap=max_gap(self.pose_t), pose_errors=self.n_errors,
                  rtf=rtf_of(self.sim_end, wall_s))
         with open(base + '.json', 'w') as f:
             json.dump(m, f, indent=1)

@@ -2,10 +2,13 @@
 import bisect
 import collections
 import math
+import traceback
 
 import numpy as np
 
 NAN = float('nan')
+POSE_MAX_BACKLOG = 1     # recorder: always process the newest /exp/model_states message
+SETTLE_MIN_DT = 0.02     # s; settle speed is only evaluated over pose pairs at least this far apart
 
 
 def _rising(flags):
@@ -83,6 +86,7 @@ class TrialSequencer:
         self.e_g_arrive = None
         self.settle_s = None
         self._ts, self._speeds, self._prev = [], [], None
+        self._last_speed = float('inf')
 
     @property
     def arrived(self):
@@ -95,12 +99,17 @@ class TrialSequencer:
                 return r
             self.t_arrive, self.e_g_arrive = t, dist
             self._ts, self._speeds = [t], [float('inf')]
+            self._last_speed = float('inf')
             self._prev = (t, x, y)
             return None
         pt, px, py = self._prev
-        self._prev = (t, x, y)
         self._ts.append(t)
-        self._speeds.append(math.hypot(x - px, y - py) / (t - pt) if t > pt else float('inf'))
+        if t - pt >= SETTLE_MIN_DT - 1e-6:
+            self._last_speed = math.hypot(x - px, y - py) / (t - pt)
+            self._prev = (t, x, y)
+        # pairs closer than SETTLE_MIN_DT (duplicate / near-duplicate receive stamps) give
+        # meaningless, possibly infinite speeds: carry the last estimate instead
+        self._speeds.append(self._last_speed)
         if settle_done(self._ts, self._speeds, self.t_arrive, self.hold, self.max_wait,
                        self.v_eps):
             self.settle_s = t - self.t_arrive
@@ -136,6 +145,22 @@ class SkipAheadQueue:
             while len(self._d) > 1:
                 self._d.popleft()
         return self._d.popleft()
+
+
+def max_gap(ts):
+    """Largest difference between consecutive entries of ts (0.0 for fewer than two)."""
+    return float(max((b - a for a, b in zip(ts[:-1], ts[1:])), default=0.0))
+
+
+def guarded_call(fn, args, on_error):
+    """fn(*args); an exception is handed to on_error(exc, traceback_text) instead of
+    propagating. Returns True on success, False after a failure."""
+    try:
+        fn(*args)
+        return True
+    except Exception as e:  # noqa: BLE001 - one bad message must not stop the worker
+        on_error(e, traceback.format_exc())
+        return False
 
 
 def rtf_of(sim_s, wall_s):

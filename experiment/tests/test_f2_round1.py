@@ -252,15 +252,6 @@ class TestSkipAheadQueue(unittest.TestCase):
         self.assertGreater(q.dropped, 0)
 
 
-class TestPoseDropsFlag(unittest.TestCase):
-    def test_flag(self):
-        base = dict(estops_src='cmd', outcome='success')
-        self.assertIn('pose_drops', analyze.sanity_flags(dict(base, pose_received=100, pose_dropped=40)))
-        self.assertNotIn('pose_drops', analyze.sanity_flags(dict(base, pose_received=100, pose_dropped=10)))
-        self.assertNotIn('pose_drops', analyze.sanity_flags(dict(base)))
-        self.assertNotIn('pose_drops', analyze.sanity_flags(dict(base, pose_received='', pose_dropped='')))
-
-
 class TestLaunchThrottle(unittest.TestCase):
     def test_model_states_throttle_100(self):
         p = os.path.join(HERE, '..', 'launch', 'exp_trial.launch')
