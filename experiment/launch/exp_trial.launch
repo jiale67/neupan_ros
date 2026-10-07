@@ -36,8 +36,10 @@
     <arg name="yaw"   value="$(arg yaw)"/>
   </include>
 
+  <!-- topic_tools throttle works on 100 Hz sim-clock ticks and passes a message only after a
+       strictly longer interval: "50" delivers 33 Hz, "100" ~66 Hz (measured with rostopic hz). -->
   <node name="exp_model_states_throttle" pkg="topic_tools" type="throttle"
-        args="messages /gazebo/model_states 50 /exp/model_states"/>
+        args="messages /gazebo/model_states 100 /exp/model_states"/>
 
   <group if="$(eval arg('method') in ('neupan', 'aabb'))">
     <include file="$(find neupan_ros)/example/gazebo_V550/launch/neupan_V550.launch">

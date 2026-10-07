@@ -76,7 +76,7 @@ class TestCodeFiles(unittest.TestCase):
                      'config/scenarios.yaml'):
             self.assertIn('%s/experiment/%s' % (rb.WS + '/src/neupan_ros', name), code)
         self.assertIn(rb.WS + '/src/neupan_ros/src/neupan_core.py', code)
-        self.assertTrue(any(p.endswith('/experiment/scripts/analyze.py') for p in code))
+        self.assertTrue(any(p.endswith('/experiment/scripts/run_batch.py') for p in code))
         self.assertTrue(any(p.endswith('/experiment/neupan_exp/metrics.py') for p in code))
         self.assertGreaterEqual(len(code), len(_glob.glob(rb.EXP_DIR + '/scripts/*.py')))
         for p in code:

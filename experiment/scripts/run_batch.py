@@ -159,8 +159,7 @@ def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None,
         wall_timeout = wall_timeout_for(trial)
     if precheck:
         precheck(trial)                  # before deleting anything: an abort keeps the old json
-    if code_check:
-        code_check(trial)
+    digest = code_check(trial) if code_check else None
     json_path, stale = _result_paths(out_dir, trial.trial_id)
     os.makedirs(out_dir, exist_ok=True)
     for p in stale:                      # an old result must never pass for this attempt
@@ -169,6 +168,8 @@ def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None,
     meta = trial_meta(trial, attempt)
     if code_check:
         meta['code_check'] = 'ok'
+        if digest:
+            meta['code_digest'] = digest
     t_wall0 = time.time()
     handle = None
     reason = None
@@ -233,7 +234,7 @@ def run_one(trial, out_dir, launcher, clock_source, goal_pub, wall_timeout=None,
                 r['meta'].update({k: meta[k] for k in
                                   ('late_start', 'actual_start_offset', 'first_clock',
                                    'wall_goal_time', 'attempt', 'goal_subscribers',
-                                   'code_check')
+                                   'code_check', 'code_digest')
                                   if k in meta})
                 r['attempts'] = attempt
                 r['runner_patched'] = True   # completeness marker (the recorder never writes it)
@@ -526,10 +527,13 @@ GIT_SCOPES = {
     'NeuPAN': ('neupan/',),
 }
 BINARIES = [WS + '/devel/lib/local_planner/omniDWA', WS + '/devel/lib/libwaypointObstaclePlugin.so']
-# Sources this experiment consists of. The repos are dirty while the experiment is developed, so
-# git HEAD alone would not notice an edit in the middle of a batch: hash them too.
-CODE_FILES = (sorted(glob.glob(EXP_DIR + '/neupan_exp/*.py') + glob.glob(EXP_DIR + '/nodes/*.py')
-                     + glob.glob(EXP_DIR + '/scripts/*.py'))
+# Sources whose content decides what a trial records. The repos are dirty while the experiment
+# is developed, so git HEAD alone would not notice an edit in the middle of a batch: hash them
+# too. analyze.py and check_scenarios.py are left out on purpose (they do not touch trial data,
+# so editing the analysis during a batch must not abort it).
+CODE_FILES = (sorted(p for p in glob.glob(EXP_DIR + '/neupan_exp/*.py')
+                     + glob.glob(EXP_DIR + '/nodes/*.py') + glob.glob(EXP_DIR + '/scripts/*.py')
+                     if os.path.basename(p) not in ('analyze.py', 'check_scenarios.py'))
               + [EXP_DIR + '/launch/exp_trial.launch', EXP_DIR + '/config/scenarios.yaml',
                  WS + '/src/neupan_ros/src/neupan_core.py'])
 
@@ -676,13 +680,26 @@ def verify_provenance(baseline, current):
     return diffs
 
 
+def code_digest(provenance):
+    """Short combined digest (12 hex chars) of the repo HEADs and all per-file hashes: one
+    value per trial that says 'this trial ran on exactly this code'."""
+    h = hashlib.sha256()
+    for k in sorted(provenance['heads']):
+        h.update(('head:%s=%s\n' % (k, provenance['heads'][k])).encode())
+    for k in sorted(provenance['sha256']):
+        h.update(('file:%s=%s\n' % (k, provenance['sha256'][k])).encode())
+    return h.hexdigest()[:12]
+
+
 def make_code_check(baseline, current_fn):
-    """code_check(trial) for run_one: AbortBatch if the code differs from `baseline`."""
+    """code_check(trial) for run_one: AbortBatch if the code differs from `baseline`; returns
+    the code digest of the verified (= baseline) code."""
     def check(trial):
         diffs = verify_provenance(baseline, current_fn())
         if diffs:
             raise AbortBatch('code changed mid-run, refusing to start trial %s:\n  %s'
                              % (trial.trial_id, '\n  '.join(diffs)))
+        return code_digest(baseline)
     return check
 
 
@@ -715,6 +732,7 @@ class Manifest:
             heads={k: v['head'] for k, v in self.data['git'].items()},
             sha256={**self.data['sha256'], **self.data['code_sha256'],
                     **self.data['binaries_sha256']})
+        self.data['code_digest'] = code_digest(self.baseline)
         if prev:
             self.data['history'].append({k: prev.get(k) for k in
                                          ('cli_args', 'start_wall', 'end_wall', 'status', 'git',

@@ -132,10 +132,12 @@ def _zero_rows(u):
     return np.all(np.abs(u) < 1e-9, axis=1)
 
 
-def uniform_estops(cmd_t, vx, vy, w, t_end=None):
+def uniform_estops(cmd_t, vx, vy, w, t_end=None, arrival_grace=1.0):
     """E-stops by one definition for every method: rising edges of 'published command exactly
     zero (|vx|,|vy|,|w| all < 1e-9)' after the first non-zero command, over commands with
-    t <= t_end (None = all)."""
+    t <= t_end (None = all). With t_end (= arrival) a zero run that is still going on at t_end
+    and started at most `arrival_grace` s before it is the planner's own arrival stop, not an
+    e-stop, and is not counted."""
     t, u = _cmd_arrays(cmd_t, vx, vy, w, t_end)
     if not t.size:
         return 0
@@ -143,7 +145,15 @@ def uniform_estops(cmd_t, vx, vy, w, t_end=None):
     nz = np.flatnonzero(~z)
     if not nz.size:
         return 0
-    return _rising(z[nz[0]:])
+    first = int(nz[0])
+    n = _rising(z[first:])
+    if t_end is not None and z[-1]:
+        k = len(z) - 1
+        while k > first and z[k - 1]:
+            k -= 1
+        if k > first and t_end - t[k] <= arrival_grace + 1e-9:
+            n -= 1                           # the trailing run is a counted rising edge
+    return n
 
 
 def cmd_jerk_split(cmd_t, vx, vy, w, t_end=None):
@@ -162,9 +172,12 @@ def accel_samples(cmd_t, vx, vy, w, t_end=None, min_dt=0.0):
     n_zero_trans counts those where exactly one of the two commands is all-zero.
     min_dt > 0 drops pairs closer together than that (planners may publish twice within one
     control cycle, which would divide a normal step by a near-zero interval);
-    n_sub_cycle counts the non-zero-transition pairs dropped for that reason."""
+    n_sub_cycle counts the non-zero-transition pairs dropped for that reason.
+    d_lin / d_ang are the per-command steps |d(vx,vy)| and |dw| of every pair not touching a
+    zero command, independent of the (recorder receive-time) timestamps: dividing them by the
+    nominal control period gives the acceleration the planner actually commanded per cycle."""
     t, u = _cmd_arrays(cmd_t, vx, vy, w, t_end)
-    a_lin, a_ang, trans, sub = [], [], 0, 0
+    a_lin, a_ang, trans, sub, d_lin, d_ang = [], [], 0, 0, [], []
     if len(t) >= 2:
         z = _zero_rows(u)
         for i in range(1, len(t)):
@@ -172,7 +185,11 @@ def accel_samples(cmd_t, vx, vy, w, t_end=None, min_dt=0.0):
             if z[i] != z[i - 1]:
                 trans += 1
                 continue
-            if z[i] or z[i - 1] or dt <= 0:
+            if z[i] or z[i - 1]:
+                continue
+            d_lin.append(float(np.hypot(u[i, 0] - u[i - 1, 0], u[i, 1] - u[i - 1, 1])))
+            d_ang.append(float(abs(u[i, 2] - u[i - 1, 2])))
+            if dt <= 0:
                 continue
             if dt < min_dt:
                 sub += 1
@@ -180,7 +197,7 @@ def accel_samples(cmd_t, vx, vy, w, t_end=None, min_dt=0.0):
             a_lin.append(float(np.hypot(u[i, 0] - u[i - 1, 0], u[i, 1] - u[i - 1, 1]) / dt))
             a_ang.append(float(abs(u[i, 2] - u[i - 1, 2]) / dt))
     return dict(a_lin=np.array(a_lin), a_ang=np.array(a_ang), n_zero_trans=trans,
-                n_sub_cycle=sub)
+                n_sub_cycle=sub, d_lin=np.array(d_lin), d_ang=np.array(d_ang))
 
 
 def status_gap_max(st_t, t_end):

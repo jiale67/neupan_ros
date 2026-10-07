@@ -67,7 +67,7 @@ def command_metrics(base, t_arrive, planner_estops):
     """Metrics derived from <base>_cmd.csv (commands up to t_arrive, or all if it is None)."""
     c = read_csv_cols(base + '_cmd.csv')
     out = dict(estops=planner_estops, estops_src='planner', J_v=NAN, J_w=NAN, a_lin=[], a_ang=[],
-               a_lin_cyc=[], a_ang_cyc=[], n_zero_trans=0, n_sub_cycle=0)
+               a_lin_cyc=[], a_ang_cyc=[], d_lin=[], d_ang=[], n_zero_trans=0, n_sub_cycle=0)
     if c is None or not len(c.get('t', [])):
         return out
     t_end = t_arrive
@@ -81,13 +81,15 @@ def command_metrics(base, t_arrive, planner_estops):
     ac = accel_samples(c['t'], c['vx'], c['vy'], c['w'], t_end, min_dt=CTRL_PERIOD / 2.0)
     out.update(a_lin=list(a['a_lin']), a_ang=list(a['a_ang']), n_zero_trans=a['n_zero_trans'],
                n_sub_cycle=ac['n_sub_cycle'], a_lin_cyc=list(ac['a_lin']),
-               a_ang_cyc=list(ac['a_ang']))
+               a_ang_cyc=list(ac['a_ang']), d_lin=list(a['d_lin']), d_ang=list(a['d_ang']))
     return out
 
 
 def sanity_flags(d):
     """Flags of one trial from a dict with (all optional) status_gap_max, n_cycles,
-    goal_subscribers, late_start, attempts, rtf. Missing / non-numeric fields never flag."""
+    goal_subscribers, late_start, attempts, rtf, estops_src + outcome. Missing / non-numeric
+    fields never flag. `estops_fallback`: a non-crash trial without a usable _cmd.csv, so the
+    planner-reported e-stop count stands in for the uniform one."""
     f = []
     g = _num(d.get('status_gap_max'))
     if g is not None and g > 0.5:
@@ -106,6 +108,8 @@ def sanity_flags(d):
     r = _num(d.get('rtf'))
     if r is not None and r < 0.9:
         f.append('rtf<0.9')
+    if d.get('estops_src') == 'planner' and d.get('outcome') != 'crash':
+        f.append('estops_fallback')
     return f
 
 
@@ -149,7 +153,7 @@ def load_trials(results):
                  settle_s=_num(d.get('settle_s')) if _num(d.get('settle_s')) is not None else NAN,
                  e_g_arrive=_num(d.get('e_g_arrive')) if _num(d.get('e_g_arrive')) is not None
                  else NAN,
-                 settled=_num(d.get('settle_s')) is not None,
+                 has_settle_key='settle_s' in d,
                  rtf=_num(d.get('rtf')) if _num(d.get('rtf')) is not None else NAN,
                  wall_s=_num(d.get('wall_s')) if _num(d.get('wall_s')) is not None else NAN,
                  goal_subscribers=meta.get('goal_subscribers', ''),
@@ -282,15 +286,26 @@ def _accel_stats(rs, lin_key, ang_key):
 
 
 def accel_summary(rows):
-    """{(scene, method): peak/p95 of the pooled executed accelerations + counts}.
-    `*` are the raw consecutive-command values (used in the table), `*_cyc` the same over
-    command pairs at least half a control cycle apart, `n_sub_cycle` how many raw pairs were
-    closer together than that."""
+    """{(scene, method): executed-command acceleration statistics, pooled over the trials}.
+
+    Primary view (table; `dv_*`, `dw_*`, `nom_*`): per-command steps |d(vx,vy)| (m/s) and
+    |dw| (rad/s) between consecutive non-zero commands, max and p95, and the same divided by
+    the nominal control period CTRL_PERIOD (`nom_peak_*`, `nom_p95_*`, m/s^2 and rad/s^2).
+    The steps do not depend on timestamps. Receive-time view (accel.csv only; `peak_*`,
+    `p95_*` use the recorder's /cmd_vel receive times as dt, `*_cyc` additionally drop pairs
+    closer than half a cycle, `n_sub_cycle` counts those): the receive times jitter by tens of
+    ms, which inflates these numbers. Pairs touching an all-zero command are in neither view
+    (`n_zero_trans` counts the zero <-> non-zero transitions)."""
     g, _ = group(rows)
     out = {}
     for key, rs in g.items():
         a = _accel_stats(rs, 'a_lin', 'a_ang')
         a.update({k + '_cyc': v for k, v in _accel_stats(rs, 'a_lin_cyc', 'a_ang_cyc').items()})
+        d = _accel_stats(rs, 'd_lin', 'd_ang')
+        a.update(dv_max=d['peak_lin'], dv_p95=d['p95_lin'], dw_max=d['peak_ang'],
+                 dw_p95=d['p95_ang'], n_steps=d['n_pairs'],
+                 nom_peak_lin=d['peak_lin'] / CTRL_PERIOD, nom_p95_lin=d['p95_lin'] / CTRL_PERIOD,
+                 nom_peak_ang=d['peak_ang'] / CTRL_PERIOD, nom_p95_ang=d['p95_ang'] / CTRL_PERIOD)
         a['n_zero_trans'] = int(sum(r.get('n_zero_trans', 0) for r in rs))
         a['n_sub_cycle'] = int(sum(r.get('n_sub_cycle', 0) for r in rs))
         a['n_trials'] = len(rs)
@@ -412,29 +427,32 @@ def matched_table(msumm, scenes):
 def accel_table(acc, scenes):
     lines = [r'\begin{table}[!htb]', '\t\\centering',
              '\t\\caption{下发指令的执行加速度统计}', '\t\\label{tab:执行加速度}', '\t\\small',
-             '\t\\begin{tabular}{llccccc}', '\t\t\\toprule',
+             '\t\\begin{tabular}{llccccccc}', '\t\t\\toprule',
              '\t\t场景 & 方法 & 平移峰值/(m/s$^2$) & 平移 $p_{95}$ & 角峰值/(rad/s$^2$) '
-             '& 角 $p_{95}$ & 零指令转换/次 \\\\']
+             '& 角 $p_{95}$ & 单步 $\\|\\Delta v\\|_{\\max}$/(m/s) '
+             '& 单步 $|\\Delta\\omega|_{\\max}$/(rad/s) & 零指令转换/次 \\\\']
     for scene in scenes:
         lines.append('\t\t\\midrule')
         for mi, m in enumerate(METHODS):
             a = acc.get((scene, m))
             head = '\\multirow{%d}{*}{%s}' % (len(METHODS), scene) if mi == 0 else ''
-            if a is None or not a['n_pairs_cyc']:
-                cells = ['--'] * 5
+            if a is None or not a['n_steps']:
+                cells = ['--'] * 7
             else:
-                cells = [f2(a['peak_lin_cyc']), f2(a['p95_lin_cyc']), f2(a['peak_ang_cyc']),
-                         f2(a['p95_ang_cyc']), str(a['n_zero_trans'])]
+                cells = [f2(a['nom_peak_lin']), f2(a['nom_p95_lin']), f2(a['nom_peak_ang']),
+                         f2(a['nom_p95_ang']), '%.3f' % a['dv_max'], '%.3f' % a['dw_max'],
+                         str(a['n_zero_trans'])]
             lines.append('\t\t%s & %s & %s \\\\' % (head, DISPLAY[m], ' & '.join(cells)))
     lines += ['\t\t\\bottomrule', '\t\\end{tabular}',
-              '\t\\par\\vspace{2pt}\\footnotesize 注：由 $\\mathrm{cmd\\_vel}$ 记录中相邻两条下发指令'
-              '计算 $\\|\\Delta(v_x,v_y)\\|/\\Delta t$ 与 $|\\Delta\\omega|/\\Delta t$，'
-              '取该场景、该方法全部试验（至到达时刻，失败试验至结束）合并后的峰值与 95 分位数；'
-              '涉及全零指令的相邻对（启动、急停、到达）不计入峰值与分位数，其中零指令与非零指令'
-              '之间的转换次数列于末列；间隔小于半个控制周期（0.05 s，同一控制周期内重复下发）的'
-              '相邻对也不计入，其条数与不做该过滤的峰值另存于 accel.csv。$\\Delta t$ 取相邻两条'
-              '指令的真实时间间隔。速度为车体系指令，车体转向时该坐标系随之旋转，会带来额外的'
-              '旋转分量。',
+              '\t\\par\\vspace{2pt}\\footnotesize 注：对各方法按同一口径统计：取 $\\mathrm{cmd\\_vel}$ '
+              '记录中相邻两条下发指令的单步变化量 $\\|\\Delta(v_x,v_y)\\|$ 与 $|\\Delta\\omega|$，'
+              '除以名义控制周期 0.1 s 得到每个控制周期的执行加速度，取该场景、该方法全部试验'
+              '（至到达时刻，失败试验至结束）合并后的峰值与 95 分位数；末两列为单步变化量的峰值。'
+              '不用相邻指令的接收时间间隔作分母：记录节点给指令打的接收时间戳存在数十毫秒的抖动'
+              '（相邻间隔 0.02～0.18 s），这是记录端时间戳效应而非规划器指令的变化，会把正常步长'
+              '放大成假峰值，按接收时间计算的峰值与分位数仅保存在 accel.csv。涉及全零指令的相邻对'
+              '（启动、急停、到达）不计入，零指令与非零指令之间的转换次数列于第九列。速度为车体系'
+              '指令，车体转向时该坐标系随之旋转，会带来额外的旋转分量。',
               r'\end{table}']
     return '\n'.join(lines)
 
@@ -715,9 +733,11 @@ SUMMARY_KEYS = ['n_trials', 'n_success', 'SR', 'T_mean', 'T_std', 'L_mean', 'L_s
                 'estops_planner_total', 'estops_planner_mean',
                 't_avg', 't95', 't_max', 'r_over', 'n_cycles', 'rtf_mean', 'outcomes']
 MATCHED_KEYS = ['n_matched'] + [k + sfx for k in MATCH_KEYS for sfx in ('_mean', '_std')]
-ACCEL_KEYS = ['peak_lin', 'p95_lin', 'peak_ang', 'p95_ang', 'n_zero_trans', 'n_sub_cycle',
-              'n_pairs', 'n_trials', 'peak_lin_cyc', 'p95_lin_cyc', 'peak_ang_cyc',
-              'p95_ang_cyc', 'n_pairs_cyc']
+ACCEL_KEYS = ['nom_peak_lin', 'nom_p95_lin', 'nom_peak_ang', 'nom_p95_ang', 'dv_max', 'dv_p95',
+              'dw_max', 'dw_p95', 'n_steps', 'n_zero_trans', 'n_sub_cycle', 'n_trials',
+              # receive-time view (inflated by timestamp jitter)
+              'peak_lin', 'p95_lin', 'peak_ang', 'p95_ang', 'n_pairs', 'peak_lin_cyc',
+              'p95_lin_cyc', 'peak_ang_cyc', 'p95_ang_cyc', 'n_pairs_cyc']
 
 
 def main(argv=None):
@@ -768,7 +788,9 @@ def main(argv=None):
                for sc in sorted(scene_methods) for m in scene_methods[sc]])
     with open(os.path.join(out, 'sanity.txt'), 'w', encoding='utf-8') as f:
         f.write(sanity_report(rows))
-    legacy_eg = any(not r['settled'] for r in rows if r['outcome'] != 'crash')
+    # legacy = an arrived trial whose json predates fix F2 (no `settle_s` key at all); a new-format
+    # timeout/stuck trial has settle_s = null and is not legacy
+    legacy_eg = any(not r['has_settle_key'] for r in rows if r['end_reason'] == 'arrived')
     write_tables(os.path.join(out, 'tables.tex'), summ, scene_methods, msumm, acc, legacy_eg)
     made = [] if a.no_figures else make_figures(out, rows, scene_methods, a.world_dir)
     print('analyzed %d trials -> %s (%d figures)' % (len(rows), out, len(made)))
