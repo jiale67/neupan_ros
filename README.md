@@ -82,7 +82,7 @@ NeuPAN（torch + cvxpy）默认会吃满所有核，饿死同机的 EKF / 底盘
 | `cpu_affinity` | `"4,5"` | 本进程所有线程绑到这些核（Orin Nano 6 核 0~5），定位等进程独占 0~3。`""` 不绑 |
 | `num_threads` | `0` | torch / OpenMP / OpenBLAS 线程数，0 = 绑定的核数 |
 | `nice` | `10` | 降低 NeuPAN 优先级，CPU 紧张时定位先跑 |
-| `control_frequency` | `20.0` | 控制循环频率。MPC 步长 0.3 s，不需要 50 Hz |
+| `control_frequency` | `10.0` | 控制循环频率。MPC 步长 0.3 s；绑 2 核单次规划约 65 ms，20 Hz 跟不上 |
 
 另外固定设置 `OMP_WAIT_POLICY=PASSIVE`：libgomp 工作线程空闲时默认自旋忙等，这是"核
 打满"的主要来源之一。
@@ -91,7 +91,7 @@ NeuPAN（torch + cvxpy）默认会吃满所有核，饿死同机的 EKF / 底盘
 
 ```
 CPU: affinity=[4, 5] (pinned 23 threads, now [4, 5]), torch threads=2, blas limit=2 (threadpoolctl), nice=10, ...
-planning time over 200 cycles: avg 35.2 ms, max 61.0 ms (control period 50.0 ms)
+planning time over 100 cycles: avg 65.1 ms, max 72.9 ms (control period 100.0 ms)
 ```
 
 平均耗时超过控制周期时会提示调低 `control_frequency`。运行中核对：
@@ -160,7 +160,7 @@ htop                                    # 看 0~3 号核是否还被打满
 | `flip_angle` | `false` | 扫描角是否反向 |
 | `scan_timeout` | `0.5` | 规划中超过这么久没收到 scan 就发零速度；也用于目标点校验。`<=0` 关闭 |
 | `max_goal_distance` | `10.0` | 目标点距离上限 m，`<=0` 不限制 |
-| `cpu_affinity` / `num_threads` / `nice` / `control_frequency` | `"4,5"` / `0` / `10` / `20.0` | CPU 资源隔离，见上文 |
+| `cpu_affinity` / `num_threads` / `nice` / `control_frequency` | `"4,5"` / `0` / `10` / `10.0` | CPU 资源隔离，见上文 |
 | `marker_size` / `marker_z` | `0.05` / `0.3` | 可视化 |
 | `omni_yaw_mode` 及 `omni_yaw_*` | `none` | 仅 `kinematics: 'omni'`（2 自由度）有效的外挂朝向环；V550 用 `omni3`，角速度由规划器直接给，这组参数不生效 |
 

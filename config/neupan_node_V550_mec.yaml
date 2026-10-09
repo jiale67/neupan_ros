@@ -20,9 +20,10 @@ neupan_node:
     num_threads: 0
     # 进程 nice 值 0~19，越大优先级越低，CPU 紧张时让定位先跑。0 = 不改
     nice: 10
-    # 控制循环频率 Hz。MPC 步长 step_time=0.3 s，20 Hz 足够；
+    # 控制循环频率 Hz。MPC 步长 step_time=0.3 s，10 Hz 足够。Orin Nano 绑 2 核实测
+    # 单次规划约 65 ms（偶尔 90 ms），20 Hz（50 ms）跟不上，所以取 10 Hz；
     # 节点每 10 s 打印一次规划耗时，平均耗时超过 1/control_frequency 时会提示调低
-    control_frequency: 20.0
+    control_frequency: 10.0
 
     # ---------- 规划器 ----------
     # 相对路径按 neupan_ros 的 share 目录（install/neupan_ros/share/neupan_ros）解析，
