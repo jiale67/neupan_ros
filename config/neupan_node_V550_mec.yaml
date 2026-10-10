@@ -1,93 +1,59 @@
-# neupan_node 参数（wheeltec V550_mec 实车）。
-# 由 launch/neupan_V550_mec.launch.py 加载；也可以启动时换一份:
-#   ros2 launch neupan_ros neupan_V550_mec.launch.py params_file:=/path/to/xxx.yaml
-#
-# 底盘和雷达不由本包启动，先在另一个终端运行:
-#   ros2 launch turn_on_wheeltec_robot turn_on_wheeltec_robot.launch.py
-
 neupan_node:
   ros__parameters:
 
-    # ---------- CPU 资源隔离 ----------
-    # NeuPAN（torch + cvxpy）默认会把所有核吃满，饿死同机的 EKF / 底盘串口 / 雷达驱动，
-    # 导致定位崩溃。这里把 NeuPAN 进程的所有线程绑到指定核上，定位等进程独占其余核。
-    #
-    # Jetson Orin Nano 8GB 是 6 核（0~5）。核 0 默认承担大部分硬件中断，不要给 NeuPAN。
-    # 默认 NeuPAN 用 4、5，0~3 留给定位、驱动、系统。
-    # 格式 "4,5" / "3-5"；"" 表示不绑核。核编号可用 `nproc` 或 `lscpu` 查。
+    # ---------- CPU ----------
+    # NeuPAN 线程绑定的核，"4,5" / "3-5"，"" 不绑。其余核留给 EKF、底盘、雷达驱动
     cpu_affinity: "4,5"
-    # torch / OpenMP / OpenBLAS 线程数。0 = 等于绑定的核数（推荐）
+    # torch / OpenMP / BLAS 线程数，0 = 绑定的核数
     num_threads: 0
-    # 进程 nice 值 0~19，越大优先级越低，CPU 紧张时让定位先跑。0 = 不改
+    # 进程 nice 值 0~19，0 = 不改
     nice: 10
-    # 控制循环频率 Hz。MPC 步长 step_time=0.3 s，10 Hz 足够。Orin Nano 绑 2 核实测
-    # 单次规划约 65 ms（偶尔 90 ms），20 Hz（50 ms）跟不上，所以取 10 Hz；
-    # 节点每 10 s 打印一次规划耗时，平均耗时超过 1/control_frequency 时会提示调低
+    # 控制频率 Hz。单次规划约 45~65 ms，20 Hz 无余量；增加核数不提速
     control_frequency: 10.0
 
     # ---------- 规划器 ----------
-    # 相对路径按 neupan_ros 的 share 目录（install/neupan_ros/share/neupan_ros）解析，
-    # 也可以写绝对路径。
+    # 相对路径按 neupan_ros 的 share 目录解析
     config_file: config/neupan_planner_V550_mec.yaml
-    # DUNE 权重按车体尺寸 (length/width) 训练，不能跨车复用。文件不存在节点直接报错。
+    # 按车体尺寸训练，换车需重训
     dune_checkpoint: model/pretrain_V550_mec/model_5000.pth
-    # 覆盖规划器 yaml 的 ipath.loop。必须 false: loop=true 时到点后折返无限往复，
-    # 不会回到等待目标点状态。写 "" 则沿用规划器 yaml。
+    # 覆盖规划器 ipath.loop，"" 沿用规划器 yaml。必须 false，否则到达后往返不停
     loop: false
 
     # ---------- 话题 ----------
-    # lslidar 驱动 laserscan_topic
     scan_topic: /scan
-    # wheeltec_robot_node 订阅，linear.x / linear.y / angular.z 都生效（车体系）
+    # 车体系 linear.x / linear.y / angular.z
     cmd_vel_topic: /cmd_vel
-    # 目标点，rviz2 工具栏 "2D Goal Pose" 发的话题。收到并校验通过后才开始规划
+    # rviz2 2D Goal Pose
     goal_topic: /goal_pose
 
     # ---------- 坐标系 ----------
-    # robot_localization EKF 的 world_frame，发布 odom_combined -> base_footprint
-    # （融合轮速 vx/vy + IMU）。目标点就在这个坐标系里解释，rviz2 Fixed Frame 设成它；
-    # 目标点 frame_id 是别的坐标系时节点会用 TF 转换过来。
+    # EKF world_frame，目标点在此坐标系下解释
     map_frame: odom_combined
-    # 车体中心，与 base_link 平面上重合（只差 z=0.01974），NeuPAN 车体矩形以它为中心
     base_frame: base_footprint
-    # lslidar 驱动 frame_id；base_footprint -> laser 静态 TF 由 robot_mode_description
-    # 按 turn_on_wheeltec_robot/config/robot_model.yaml 的 V550_mec.base_to_laser 发布
     lidar_frame: laser
 
-    # ---------- scan 处理 ----------
-    # 不做车体剔除滤波: lslidar 驱动已按 wheeltec_param.yaml 的 angle_disable_min/max
-    # 把车体后方角度裁掉（填 inf），节点丢弃非有限值。
-    #
-    # 使用的量程 [min, max] m，再与驱动的 range_min/range_max（lslidar min_range=0.15）
-    # 取交集。上限给 8 m: pan.dune_max_num=100 限制了每帧送进 DUNE 的点数，量程太大
-    # 会让远处无关点挤掉近处关键点。
+    # ---------- scan ----------
+    # 量程 [min, max] m，与驱动 range_min/range_max 取交集
     scan_range: [0.0, 8.0]
-    # 使用的角度范围 [min, max] rad，雷达系
+    # 角度范围 [min, max] rad，雷达系
     scan_angle_range: [-3.15, 3.15]
-    # 每隔几束取一束
-    scan_downsample: 3
-    # 扫描角是否反向（雷达倒装时用）
+    # 每 N 束取一束
+    scan_downsample: 2
+    # 扫描角反向（雷达倒装）
     flip_angle: false
-    # 规划中超过这么久 (s) 没收到 scan 就发零速度；目标点校验也要求 scan 在此时间内。
-    # <=0 关闭
+    # scan 超时 s：规划中超时发零速度，超时也拒绝新目标点。<=0 关闭
     scan_timeout: 0.5
 
-    # ---------- 目标点校验 ----------
-    # 目标点离当前位置超过此距离 (m) 则拒绝，防止 rviz 误点到远处。<=0 不限制
+    # ---------- 目标点 ----------
+    # 最大目标距离 m，<=0 不限制
     max_goal_distance: 10.0
+
+    # ---------- 底盘执行延迟补偿 ----------
+    # true: 用最近 cmd_delay 秒内已发的 cmd_vel 前推测量位姿，再交给规划器
+    cmd_delay_compensation: true
+    # 底盘纯延迟 s。V550 实测 vx 0.4、vy 0.7、w 0.7~1.4；换车或换固件需重测
+    cmd_delay: 1.0
 
     # ---------- 可视化 ----------
     marker_size: 0.05
     marker_z: 0.3
-
-    # ---------- omni（2 自由度）朝向补偿环 ----------
-    # 只对规划器 yaml 里 kinematics: 'omni' 有效。V550 用 omni3，角速度由规划器直接
-    # 给出，下面这组参数不生效。
-    omni_yaw_mode: none        # none | heading | spin
-    omni_yaw_gain: 1.5
-    omni_yaw_max: 1.0
-    omni_yaw_min_speed: 0.02
-    omni_yaw_tau: 0.3
-    omni_yaw_deadband: 0.12
-    omni_yaw_accel: 2.0
-    omni_spin_speed: 0.8
