@@ -41,6 +41,7 @@ setup(
     entry_points={
         'console_scripts': [
             'neupan_node = neupan_ros.neupan_node:main',
+            'vel_monitor = neupan_ros.vel_monitor:main',
         ],
     },
 )
